@@ -12,10 +12,10 @@ Outbound (to field operator):
 
 Inbound (from field operator):
   - status   / stat / check    → query and reply
-  - halt     / stop / freeze   → acknowledge (Nav2 cancel via ghost_bridge)
-  - resume   / go              → acknowledge
-  - reset    / clear           → reset GHOST search
-  - home     / rtb / return    → relay to bridge via ROS2 topic (future)
+  - halt     / stop / freeze   → HALT: robot stops (no goals while halted)
+  - go / start / resume        → GO: start the search, or continue after a halt
+  - home     / rtb / return    → drive back to the launch point
+  - reset    / clear           → new search on the same grid (then send go)
 
 Usage:
   python3 pi/operator_link.py                 # real LoRa radio (auto-detect)
@@ -83,7 +83,7 @@ class CommandDecoder:
 
     @staticmethod
     def help_text() -> str:
-        return "cmds: halt stop resume status reset home help"
+        return "cmds: go halt status home reset help"
 
 
 # ── LoRa radio transport ──────────────────────────────────────────────────────
@@ -224,8 +224,8 @@ async def _query(ws) -> dict:
     return json.loads(await ws.recv())
 
 
-async def _reset(ws) -> dict:
-    await ws.send(json.dumps({"type": "reset"}))
+async def _command(ws, action: str) -> dict:
+    await ws.send(json.dumps({"type": "command", "action": action}))
     return json.loads(await ws.recv())
 
 
@@ -238,7 +238,7 @@ def _fmt_status(state: dict) -> str:
             f"{','.join(c['sensors'])}"
         )
     return (
-        f"SRCH "
+        f"{state.get('mission', '?').upper()} "
         f"P={state.get('max_probability', 0):.3f} "
         f"S={state.get('sweep_count', 0)} "
         f"H={state.get('entropy', 0):.2f} "
@@ -268,7 +268,9 @@ class OperatorLink:
     async def run(self) -> None:
         while True:
             try:
-                async with websockets.connect(self._ws_url) as ws:
+                async with websockets.connect(self._ws_url, max_size=None) as ws:
+                    await ws.recv()   # the core pushes a snapshot on connect — drain it,
+                                      # or every reply after this is one message stale
                     log.info(f"connected to GHOST at {self._ws_url}")
                     await self._loop(ws)
             except (websockets.ConnectionClosed, OSError) as exc:
@@ -310,26 +312,29 @@ class OperatorLink:
     async def _handle(self, ws, text: str) -> str | None:
         cmd, _ = self._decoder.decode(text)
         if cmd is None:
-            return "GHOST: unclear — try: status halt resume reset home"
+            return "GHOST: unclear — try: go halt status home reset"
 
         if cmd == "status":
             state = await _query(ws)
             return _fmt_status(state)
 
-        if cmd == "reset":
-            await _reset(ws)
-            return "GHOST: search reset OK"
+        if cmd == "reset":                    # new search, same grid; waits for GO
+            state = await _command(ws, "abort")
+            return f"GHOST: new search ready ({state.get('mission')}) — send go"
 
-        if cmd == "halt":
-            # ghost_bridge monitors /ghost/contact and cancels Nav2 on its own;
-            # a separate halt topic can be added when motor control is wired up
-            return "GHOST: halt relayed"
+        if cmd == "halt":                     # robot stops: no goals while halted
+            state = await _command(ws, "halt")
+            return f"GHOST: {state.get('mission', '?').upper()}"
 
-        if cmd == "resume":
-            return "GHOST: resume — search continues"
+        if cmd == "resume":                   # GO: start from idle, or continue after halt
+            state = await _query(ws)
+            action = "start" if state.get("mission") == "idle" else "resume"
+            state = await _command(ws, action)
+            return f"GHOST: {state.get('mission', '?').upper()}"
 
         if cmd == "return_home":
-            return "GHOST: return-home noted — relay to operator"
+            state = await _command(ws, "return_home")
+            return f"GHOST: {state.get('mission', '?').upper()}"
 
         if cmd == "help":
             return CommandDecoder.help_text()

@@ -123,6 +123,8 @@ Pi:      bash pi/hailo_setup.sh firmware|install|verify ; GHOST_HOST=<jetson> ba
 
 On the Jetson, `jetson/launch/robot.launch.py` brings up the Gemini 330 depth camera, cuVSLAM odometry and a minimal Nav2: MPPI in omni mode for the mecanum base, with rolling-window costmaps fed by the depth point cloud. `jetson/base_driver.py` converts `/cmd_vel` into wheel speeds for the motor board (`jetson/motor_board.py`). It has a 0.4 s no-command stop, and `--identify` / `--spin-test` for checking the wiring. `jetson/frame_server.py` forwards camera frames to the Pi, where `sensors/detector.py` runs YOLOv8 on the Hailo AI HAT.
 
+**Operator control:** the Pi sets up the search grid, but nothing moves until the operator presses **GO**, either on the dashboard (`dashboard/index.html?ws=ws://<jetson>:9001/ws`) or by texting `go` over Meshtastic. **HALT** (button, Space bar, or text `halt`) stops the robot: the core stops planning and ignores sensor readings until RESUME, and the bridge cancels the Nav2 goal. Mission states: `idle → active ⇄ halted`, `returning`, `complete` on contact.
+
 The bridge (`jetson/ghost_bridge.py`) feeds odometry into GHOST and sends Nav2 to the centre of each next cell. It cancels the goal if the core stops answering. CONTACT is published on `/ghost/contact` and sent over LoRa to the operator.
 
 ---

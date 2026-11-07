@@ -20,12 +20,14 @@ Record each stage's result in the sheet at the bottom. Don't move on from a FAIL
 | How | Effect |
 |---|---|
 | **Physical kill** (switch or battery) | always works: use it first if in doubt |
+| **HALT** on the dashboard (or Space) | core stops planning, bridge cancels the Nav2 goal, wheels stop within ~0.5 s |
+| text `halt` over Meshtastic | same as HALT, after radio latency (a few seconds) |
 | Release the teleop key | wheels stop in ≤ 0.5 s (teleop deadman + driver 0.4 s watchdog) |
 | `bash bench/stop.sh` (Jetson) | bridge cancels its Nav2 goal, zero velocity sent, stack shuts down |
 | Ctrl-C on `jetson/start.sh` | everything stops; the driver sends zero on exit |
 
-Known gap: texting `halt` over Meshtastic is acknowledged but **does not stop
-the robot** on this branch. Don't rely on it.
+After a HALT: **RESUME** continues the search, **RTB** drives back to the
+launch point, **NEW SEARCH** resets the belief and waits for GO again.
 
 ---
 
@@ -127,13 +129,20 @@ bash bench/preflight.sh               # all PASS
 Laptop (same network), to watch:
 open `dashboard/index.html?ws=ws://<jetson-ip>:9001/ws&cell=0.5`.
 
-Pi. The bridge holds the robot still until sensor data flows, so **the robot
-starts moving as soon as this connects**. Driver: hand on the kill.
+Pi. This sets up the search grid and streams sensors; the robot does **not**
+move yet. The dashboard shows `READY — PRESS GO`.
 ```bash
 GHOST_FRAMES=tcp://<jetson-ip>:5555 python3 sensors/fusion.py --hardware --host <jetson-ip> \
     --grid 10x10 --cell-m 0.5 --lkp 2.5,2.5 --sigma 1.5 --specs sensors/indoor_specs.json
 ```
+Driver: hand on the kill. Operator: press **GO** on the dashboard, or text `go`.
+
+Mid-search drills: press **HALT**, and the robot stops within about 0.5 s. Press
+**RESUME** and it continues. Then text `halt` over the radio, then `go` again.
+
 **Pass:**
+- Nothing moves before GO.
+- HALT stops it (both from the dashboard and over the radio).
 - The robot visits cells, and the dashboard's robot marker matches where it really is (within one cell).
 - It stays inside the grid and avoids obstacles.
 - It declares CONTACT within about 1 m of the subject, in under 5 minutes.
@@ -155,6 +164,7 @@ Record time to contact and the contact error.
 | D false-hit rate, empty room | | |
 | E goal error ×3 | | |
 | F stops | | |
+| G HALT latency: dashboard / radio | | ___ s / ___ s |
 | G time to contact / contact error | | ___ s / ___ m |
 | Battery start → end | | ___ → ___ mV |
 
@@ -162,8 +172,8 @@ Record time to contact and the contact error.
 
 The numbers above should settle these:
 
-1. **Remote stop.** Make the Meshtastic `halt` actually stop the robot (mission state in the core), or rely on the physical kill?
-2. **Who starts the search.** Today the Pi starts it on connect. Instead: an operator GO from a dashboard or the radio?
+1. ~~Remote stop~~ and ~~who starts the search~~: decided. HALT stops the robot, and the operator's GO starts the search.
+2. **Lost link.** If the operator's radio or Wi-Fi drops mid-search, should the robot halt on its own after N seconds?
 3. **Operator view.** The current dashboard is read-only over Wi-Fi. Do we need planning (area / POIs / no-go), and over LoRa or Wi-Fi?
 4. **Sensor set.** Keep or drop each sensor based on its D-stage range and false-hit numbers.
 5. **Speed and grid.** Grid size, cell size and Nav2 speed limits, based on E and G.

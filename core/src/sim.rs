@@ -2,7 +2,7 @@
 /// Prints a coloured ASCII heatmap + state to stdout after each step.
 /// Run with: `cargo run -- --sim`
 
-use crate::engine::{GhostEngine, IncomingMsg};
+use crate::engine::{Action, GhostEngine, IncomingMsg};
 use crate::sensor_model::SensorType;
 
 pub fn run() {
@@ -19,6 +19,7 @@ pub fn run() {
         prior_sigma_m: Some(12.0),
         sensor_specs: None,
     });
+    step(&mut eng, "GO", IncomingMsg::Command { action: Action::Start });
 
     // ── 2. Robot moves NE — negative sweeps shift mass SW ─────────────────
     for (i, (wx, wy)) in [(2.0,2.0),(4.0,4.0),(6.0,6.0),(8.0,8.0)].iter().enumerate() {

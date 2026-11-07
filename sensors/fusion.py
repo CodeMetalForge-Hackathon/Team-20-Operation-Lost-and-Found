@@ -128,7 +128,9 @@ async def run_hardware(ws_url: str) -> None:
         log.info("connected to %s", ws_url)
         await ws.send(_config_msg())
         state = json.loads(await ws.recv())
-        log.info("engine configured")
+        log.info("search grid configured — waiting for the operator's GO "
+                 "(dashboard button or 'go' over the radio)")
+        last_mission = state.get("mission")
 
         imu_interval    = 1.0 / IMU_HZ
         sensor_interval = 1.0 / SENSOR_HZ
@@ -154,7 +156,10 @@ async def run_hardware(ws_url: str) -> None:
                     state = json.loads(await ws.recv())
                     for _, s in sensors:
                         s.update_robot_pos(state["robot_x"], state["robot_y"])
-                if sensors:
+                if state.get("mission") != last_mission:
+                    last_mission = state.get("mission")
+                    log.warning("mission: %s", last_mission)
+                if sensors and last_mission == "active":
                     _log_state(state)
                 if state.get("contact"):
                     log.warning("CONTACT DECLARED — holding position")
@@ -187,6 +192,8 @@ async def run_stub(ws_url: str) -> None:
     async with websockets.connect(ws_url) as ws:
         log.info("connected to %s (stub mode)", ws_url)
         await ws.send(_config_msg())
+        state = json.loads(await ws.recv())
+        await ws.send(json.dumps({"type": "command", "action": "start"}))   # demo: GO immediately
         state = json.loads(await ws.recv())
         log.info("engine configured — starting autonomous demo")
 

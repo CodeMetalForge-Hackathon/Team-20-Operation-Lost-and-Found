@@ -154,6 +154,9 @@ The first lines say which sensors are live. A sensor without hardware is
 **excluded**, never simulated, and the log tells you so. Vision should log
 `[Vision] hailo on tcp://…`.
 
+This sets up the search but **doesn't start it**. The robot waits for the
+operator to press GO.
+
 - **Grid:** 10×10 at 0.5 m covers a 5 m room. `--lkp` is the centre of where
   to look, `--sigma` how spread out.
 - **Sensor ranges:** `indoor_specs.json` has short ranges suited to a room.
@@ -166,9 +169,25 @@ python3 ~/ghost/pi/operator_link.py --host <jetson-ip> --allow '!a1b2c3d4'
 ```
 
 `--allow` takes the operator's Meshtastic node ID (shown in the Meshtastic
-app). Only that node can command the drone. The operator texts `status`,
-`halt`, `go`, `home` or `reset` from the Meshtastic app. Contact alerts and a
-status line every 45 s come back the same way.
+app). Only that node can command the drone. Contact alerts and a status line
+every 45 s come back the same way.
+
+### 2.4 Operator controls
+
+Two ways to run the robot. Both do exactly the same thing:
+
+| | Dashboard (laptop on the same Wi-Fi) | Meshtastic text |
+|---|---|---|
+| Start the search | **GO** | `go` |
+| Stop | **HALT** (or Space) | `halt` / `stop` |
+| Continue | **RESUME** | `go` |
+| Back to the launch point | **RTB** | `home` |
+| New search, same grid | **NEW SEARCH** (click twice) | `reset`, then `go` |
+| State | badge, top right | `status` |
+
+Open the dashboard at:
+`dashboard/index.html?ws=ws://<jetson-ip>:9001/ws&cell=0.5`
+(use the same `cell` value as `--cell-m`).
 
 ---
 
