@@ -3,12 +3,11 @@
 /// internally but exposed as linear probabilities.
 #[derive(Debug, Clone)]
 pub struct BeliefMap {
-    pub width: usize,
-    pub height: usize,
+    pub width:       usize,
+    pub height:      usize,
     pub cell_size_m: f64,
     cells: Vec<f64>,      // row-major: index = y * width + x
     pub swept: Vec<bool>,
-    terrain: Vec<f64>,    // 0 = impassable, 1 = fully open
 }
 
 impl BeliefMap {
@@ -16,18 +15,13 @@ impl BeliefMap {
         let n = width * height;
         let uniform = 1.0 / n as f64;
         Self {
-            width,
-            height,
-            cell_size_m,
+            width, height, cell_size_m,
             cells: vec![uniform; n],
             swept: vec![false; n],
-            terrain: vec![1.0; n],
         }
     }
 
     /// Gaussian prior centred on last-known position (world metres).
-    /// Attenuated by terrain weight so the subject can't have crossed
-    /// impassable cells.
     pub fn init_gaussian_prior(&mut self, lkp_x: f64, lkp_y: f64, sigma_m: f64) {
         let sigma_c = sigma_m / self.cell_size_m;
         let cx = lkp_x / self.cell_size_m;
@@ -38,8 +32,7 @@ impl BeliefMap {
             for x in 0..self.width {
                 let dx = x as f64 - cx;
                 let dy = y as f64 - cy;
-                let p = (-( dx*dx + dy*dy ) / (2.0 * sigma_c * sigma_c)).exp()
-                    * self.terrain[y * self.width + x];
+                let p = (-(dx * dx + dy * dy) / (2.0 * sigma_c * sigma_c)).exp();
                 self.cells[y * self.width + x] = p;
                 sum += p;
             }
@@ -49,10 +42,6 @@ impl BeliefMap {
 
     pub fn get(&self, x: usize, y: usize) -> f64 {
         self.cells[y * self.width + x]
-    }
-
-    pub fn set_terrain(&mut self, x: usize, y: usize, weight: f64) {
-        self.terrain[y * self.width + x] = weight.clamp(0.0, 1.0);
     }
 
     /// Multiply every cell by its likelihood factor then renormalise.
@@ -75,7 +64,7 @@ impl BeliefMap {
         self.swept[y * self.width + x]
     }
 
-    /// Serialise as row-major 2-D vec for JSON/dashboard.
+    /// Serialise as row-major 2-D vec for JSON / dashboard.
     pub fn as_grid(&self) -> Vec<Vec<f64>> {
         (0..self.height)
             .map(|y| (0..self.width).map(|x| self.get(x, y)).collect())

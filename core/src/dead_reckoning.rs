@@ -1,7 +1,7 @@
 /// GPS-free position estimate via IMU integration.
-/// Uses a simple heading update (gyro-integrated) + trapezoidal
-/// velocity/position integration.  Zero-velocity detection from
-/// accelerometer magnitude damps drift when the robot is stationary.
+/// Uses gyro-integrated heading + trapezoidal velocity/position integration.
+/// Zero-velocity detection from accelerometer magnitude damps drift when
+/// the robot is stationary.
 #[derive(Debug, Clone)]
 pub struct DeadReckoning {
     pub pos_x:         f64,    // metres from origin
@@ -11,8 +11,8 @@ pub struct DeadReckoning {
     pub heading:       f64,    // radians, 0 = +x axis, CCW positive
     pub altitude:      f64,    // metres, integrated from az
     pub altitude_rate: f64,    // m/s — positive = rising
-    pub lateral_g:     f64,    // horizontal accel magnitude (m/s²) — slope indicator
-    alt_vel:           f64,    // internal vertical velocity integrator
+    pub lateral_g:     f64,    // horizontal accel magnitude (m/s²) — slope proxy
+    alt_vel:           f64,
 }
 
 impl DeadReckoning {
@@ -33,32 +33,26 @@ impl DeadReckoning {
     /// gz     : yaw rate (rad/s, +CCW)
     /// dt     : sample interval (s)
     pub fn update(&mut self, ax: f64, ay: f64, az: f64, gz: f64, dt: f64) {
-        // ── heading ──────────────────────────────────────────────────────────
         self.heading = (self.heading + gz * dt).rem_euclid(std::f64::consts::TAU);
 
-        // ── horizontal position ───────────────────────────────────────────────
         let (sh, ch) = self.heading.sin_cos();
         let world_ax = ch * ax - sh * ay;
         let world_ay = sh * ax + ch * ay;
 
-        let mag = (ax * ax + ay * ay).sqrt();
+        let mag   = (ax * ax + ay * ay).sqrt();
         let decay = if mag < 0.08 { 0.80 } else { 1.0 };
 
-        self.vel_x = self.vel_x * decay + world_ax * dt;
-        self.vel_y = self.vel_y * decay + world_ay * dt;
-        self.pos_x += self.vel_x * dt;
-        self.pos_y += self.vel_y * dt;
-
-        // Lateral accel magnitude → pitch/roll proxy for slope detection
+        self.vel_x     = self.vel_x * decay + world_ax * dt;
+        self.vel_y     = self.vel_y * decay + world_ay * dt;
+        self.pos_x    += self.vel_x * dt;
+        self.pos_y    += self.vel_y * dt;
         self.lateral_g = mag;
 
-        // ── vertical / elevation ──────────────────────────────────────────────
-        // Accelerometer measures specific force: flat+stationary → az ≈ +9.81.
-        // Net vertical accel = az - 9.81 (removes gravity).
-        // Cliff: reaction force drops, az < 9.81, net < 0 → altitude falls.
-        // Obstacle/impact: az spikes > 9.81, net > 0 → altitude rises briefly.
-        let vert_net = az - 9.81;
-        let alt_damp = if vert_net.abs() < 0.15 { 0.85 } else { 1.0 };
+        // Vertical: net accel = az − 9.81 (removes gravity component).
+        // Cliff: reaction force drops → az < 9.81 → altitude falls.
+        // Impact: az spikes > 9.81 → altitude rises briefly.
+        let vert_net   = az - 9.81;
+        let alt_damp   = if vert_net.abs() < 0.15 { 0.85 } else { 1.0 };
         self.alt_vel       = self.alt_vel * alt_damp + vert_net * dt;
         self.altitude     += self.alt_vel * dt;
         self.altitude_rate = self.alt_vel;
@@ -77,11 +71,5 @@ impl DeadReckoning {
         let cx = (self.pos_x / cell_size_m).max(0.0) as usize;
         let cy = (self.pos_y / cell_size_m).max(0.0) as usize;
         (cx.min(width.saturating_sub(1)), cy.min(height.saturating_sub(1)))
-    }
-
-    /// Passability weight from vertical accel deviation (simple heuristic).
-    pub fn slope_weight(az_body: f64) -> f64 {
-        let deviation = (az_body - 9.81).abs();
-        (1.0 - (deviation / 9.81)).clamp(0.1, 1.0)
     }
 }

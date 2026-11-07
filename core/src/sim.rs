@@ -17,6 +17,7 @@ pub fn run() {
         width: 20, height: 20, cell_size_m: 2.0,
         last_known_x: 20.0, last_known_y: 20.0,
         prior_sigma_m: Some(12.0),
+        sensor_specs: None,
     });
 
     // ── 2. Robot moves NE — negative sweeps shift mass SW ─────────────────

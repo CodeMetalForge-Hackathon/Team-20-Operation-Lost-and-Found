@@ -1,20 +1,18 @@
-use crate::{belief_map::BeliefMap, sensor_model::SensorType};
+use crate::{belief_map::BeliefMap, sensor_model::SensorSpec};
 
 pub struct PathPlanner;
 
 impl PathPlanner {
-    /// Next cell to visit: maximises P(c) × hazard_weight(c) × sar_priority(c)
-    /// / (1 + travel_weight × manhattan_dist).
-    /// Skips already-swept cells.
+    /// Next cell to visit: maximises P(c) × hazard_weight(c) × sar_boost(c)
+    /// / (1 + 0.08 × manhattan_dist).  Skips already-swept cells.
     ///
-    /// `hazard_weights` is row-major (y * width + x), range 0.05–1.0.
-    /// `sar_boosts` is the same layout, range ≥ 1.0 (ravine priority uplift).
-    /// Pass slices of length width*height; empty slices → all weights = 1.
+    /// `hazard_weights` and `sar_boosts` are row-major slices (y*width+x).
+    /// Pass empty slices when no hazard data is available.
     pub fn next_waypoint(
-        map:          &BeliefMap,
-        robot_cell:   (usize, usize),
+        map:            &BeliefMap,
+        robot_cell:     (usize, usize),
         hazard_weights: &[f64],
-        sar_boosts:   &[f64],
+        sar_boosts:     &[f64],
     ) -> Option<(usize, usize)> {
         let (rx, ry) = robot_cell;
         let mut best   = f64::NEG_INFINITY;
@@ -43,39 +41,37 @@ impl PathPlanner {
         target
     }
 
-    /// Compute per-cell likelihood-ratio factors for a sensor sweep.
+    /// Per-cell likelihood-ratio factors for one sensor sweep.
     ///
-    /// For every cell c:
-    ///   factor(c) = LR_positive(dist(robot, c))   if detection == true
-    ///             = LR_negative(dist(robot, c))    if detection == false
+    /// For each cell c:
+    ///   factor(c) = LR_positive(dist)  if detection == true
+    ///             = LR_negative(dist)  if detection == false
     ///
-    /// `confidence` ∈ [0,1] blends the LR toward 1.0 (no update) for
-    /// low-confidence readings (e.g., partial occlusion).
+    /// `confidence` ∈ [0,1] blends the LR toward 1.0 (no information) for
+    /// low-confidence readings (partial occlusion, sensor uncertainty).
     pub fn likelihood_factors(
-        map: &BeliefMap,
+        map:        &BeliefMap,
         robot_cell: (usize, usize),
-        sensor: &SensorType,
-        detection: bool,
+        spec:       &SensorSpec,
+        detection:  bool,
         confidence: f64,
     ) -> Vec<f64> {
         let (rx, ry) = robot_cell;
-        let cell_m = map.cell_size_m;
-        let conf = confidence.clamp(0.0, 1.0);
+        let cell_m   = map.cell_size_m;
+        let conf     = confidence.clamp(0.0, 1.0);
 
         (0..map.height)
             .flat_map(|y| {
                 (0..map.width).map(move |x| {
-                    let dx = (x as f64 - rx as f64) * cell_m;
-                    let dy = (y as f64 - ry as f64) * cell_m;
+                    let dx   = (x as f64 - rx as f64) * cell_m;
+                    let dy   = (y as f64 - ry as f64) * cell_m;
                     let dist = (dx * dx + dy * dy).sqrt();
-
-                    let raw_lr = if detection {
-                        sensor.lr_positive(dist)
+                    let raw  = if detection {
+                        spec.lr_positive(dist)
                     } else {
-                        sensor.lr_negative(dist)
+                        spec.lr_negative(dist)
                     };
-                    // Blend: lr = 1 + conf*(raw - 1)
-                    1.0 + conf * (raw_lr - 1.0)
+                    1.0 + conf * (raw - 1.0)
                 })
             })
             .collect()
