@@ -1,6 +1,9 @@
 ![Brainstorm whiteboard — CH-1 draft](brainstorm_1.png)
 *Brainstorm whiteboard, CH-1 (draft).*
 
+
+NOTE: Check point 1, 60 minutes, limits we expect to run in to, ASK outlves to either keep going or reduce scope to key product we've already identified 
+
 # Operation Lost and Found — Code Metal Forge 2026
 
 **SITREP — CH-1** | Sat 07 Nov 2026 | BASE X, Boston
@@ -67,7 +70,7 @@ This is established search theory (it is the basis of how the U.S. Coast Guard p
 |---|-----------|-------|
 | 1 | Drones that can move through positions | Eric |
 | 2 | Algorithm that creates the travel path | Jeff |
-| — | | Sebastian — *role to fill in* |
+| 3 | | Sebastian — supervise, refine, fill in, develop UML and Arch-Sys design |
 
 The handoff between 1 and 2 is the critical interface: **Jeff's algorithm outputs an ordered list of waypoints; Eric's drone layer consumes that list and flies it.** Agreeing on that format early lets both build in parallel.
 
