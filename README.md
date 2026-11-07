@@ -108,6 +108,22 @@ Hazard cells are rendered with coloured borders on the dashboard and routed arou
 
 ---
 
+## Running on hardware (Jetson + Pi)
+
+```
+Jetson:
+  ./jetson/start.sh                    # ghost-core + Nav2 bridge + ROS2 nav stack
+  GHOST_ADDR=0.0.0.0:9001 ./jetson/start.sh   # expose to Pi over LAN
+
+Pi:
+  cd sensors && python3 fusion.py --hardware --host <jetson-ip>
+  python3 pi/operator_link.py --host <jetson-ip>  # LoRa operator comms
+```
+
+The bridge process (`jetson/ghost_bridge.py`) connects cuVSLAM odometry to GHOST Teleport, reads `next_waypoint` from every snapshot, and drives Nav2 there. CONTACT declarations are published to `/ghost/contact` and broadcast over LoRa to the field operator.
+
+---
+
 ## Directory structure
 
 ```
@@ -122,13 +138,21 @@ ghost/
 │       ├── engine.rs       GhostEngine — message handler + snapshot
 │       ├── server.rs       axum WebSocket server
 │       └── sim.rs          scripted headless demo (cargo run -- --sim)
-├── sensors/                Python — hardware abstraction
+├── sensors/                Python — Pi sensor abstraction
 │   ├── fusion.py           main loop — hardware or stub mode
 │   ├── imu.py              MPU-6050 / random-walk stub
 │   ├── thermal.py          MLX90640 / Pd(dist) stub
 │   ├── vision.py           YOLOv8-nano / Pd(dist) stub
 │   ├── acoustic.py         PyAudio FFT VAD / Pd(dist) stub
 │   └── ir.py               RPi.GPIO / 3 m-range stub
+├── jetson/                 Jetson — navigation bridge
+│   ├── ghost_bridge.py     cuVSLAM odom → GHOST Teleport + GHOST wp → Nav2
+│   ├── nav2_driver.py      clean Nav2 BasicNavigator wrapper
+│   ├── start.sh            launch script (core + bridge + ROS2 nav)
+│   └── requirements.txt
+├── pi/                     Pi — operator comms
+│   ├── operator_link.py    LoRa (Meshtastic) ↔ GHOST status relay
+│   └── requirements.txt
 ├── dashboard/
 │   └── index.html          single-file live dashboard (no build step)
 └── docs/
@@ -155,7 +179,16 @@ The Pi runs `fusion.py --hardware`; it connects to the Jetson's WebSocket over E
 
 ## ROS2 integration
 
-`ghost-core` is I/O-free and stateless by design — it plugs into any navigation stack via a thin bridge node. See the overview in the team wiki for the `/ghost/belief_grid` → Nav2 costmap pattern.
+`ghost-core` is I/O-free and stateless by design — it plugs into any navigation stack via a thin bridge node.
+
+`ghost_bridge.py` publishes two topics:
+
+| Topic | Type | Content |
+|-------|------|---------|
+| `/ghost/contact` | `std_msgs/String` | JSON ContactDeclaration when GHOST declares a find |
+| `/ghost/status` | `std_msgs/String` | JSON snapshot every ~250 ms (entropy, peak_p, sweeps, elevation, hazards) |
+
+Swap `--odom /visual_slam/tracking/odometry` → `--odom /odom` to use wheel odometry instead of cuVSLAM.
 
 ---
 

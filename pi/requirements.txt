@@ -1,0 +1,4 @@
+# Pi-side dependencies
+websockets>=11.0
+meshtastic
+pypubsub
