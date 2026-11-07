@@ -63,13 +63,19 @@ def _teleport_msg(x: float, y: float) -> str:
     return json.dumps({"type": "teleport", "x": round(x, 3), "y": round(y, 3)})
 
 
+SENSOR_SPECS = None   # optional per-sensor overrides (--specs file.json)
+
+
 def _config_msg() -> str:
-    return json.dumps({
+    msg = {
         "type": "config",
         "width": GRID_W, "height": GRID_H, "cell_size_m": CELL_SIZE_M,
         "last_known_x": LKP_X, "last_known_y": LKP_Y,
         "prior_sigma_m": PRIOR_SIGMA,
-    })
+    }
+    if SENSOR_SPECS:
+        msg["sensor_specs"] = SENSOR_SPECS
+    return json.dumps(msg)
 
 
 def _log_state(state: dict) -> None:
@@ -107,11 +113,21 @@ async def run_hardware(ws_url: str) -> None:
         ("acoustic", acoustic),
         ("ir",       ir_sens),
     ]
+    # A sensor whose hardware failed to start falls back to its simulator —
+    # never feed simulated readings into a real search.
+    live = [(n, s) for n, s in sensors if getattr(s, "_hw", False)]
+    for n, s in sensors:
+        if (n, s) not in live:
+            log.warning("%s: no hardware — excluded from the search", n)
+    sensors = live
+    use_imu = getattr(imu, "_hw", False)
+    if not use_imu:
+        log.warning("imu: no hardware — dead reckoning/terrain alerts off (odometry comes from the Jetson)")
 
     async with websockets.connect(ws_url) as ws:
         log.info("connected to %s", ws_url)
         await ws.send(_config_msg())
-        await ws.recv()
+        state = json.loads(await ws.recv())
         log.info("engine configured")
 
         imu_interval    = 1.0 / IMU_HZ
@@ -121,7 +137,7 @@ async def run_hardware(ws_url: str) -> None:
         while True:
             now = time.monotonic()
 
-            if now - t_imu >= imu_interval:
+            if use_imu and now - t_imu >= imu_interval:
                 r = imu.read()
                 await ws.send(_imu_msg(r.ax, r.ay, r.az, r.gz, r.dt))
                 state = json.loads(await ws.recv())
@@ -132,9 +148,14 @@ async def run_hardware(ws_url: str) -> None:
             if now - t_sensor >= sensor_interval:
                 for name, sensor in sensors:
                     reading = sensor.read()
+                    if not getattr(reading, "valid", True):
+                        continue                   # e.g. no fresh camera frame
                     await ws.send(_sensor_msg(name, reading.detection, reading.confidence))
                     state = json.loads(await ws.recv())
-                _log_state(state)
+                    for _, s in sensors:
+                        s.update_robot_pos(state["robot_x"], state["robot_y"])
+                if sensors:
+                    _log_state(state)
                 if state.get("contact"):
                     log.warning("CONTACT DECLARED — holding position")
                 t_sensor = now
@@ -235,8 +256,25 @@ def main() -> None:
     p.add_argument("--hardware", action="store_true", help="use real sensors")
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=9001)
+    p.add_argument("--grid", default=None, help="hardware: search grid WxH cells, e.g. 10x10")
+    p.add_argument("--cell-m", type=float, default=None, help="hardware: cell size (m), e.g. 0.5")
+    p.add_argument("--lkp", default=None, help="hardware: last-known position X,Y (m) on the grid")
+    p.add_argument("--sigma", type=float, default=None, help="hardware: prior spread (m)")
+    p.add_argument("--specs", default=None,
+                   help="hardware: sensor model overrides JSON, e.g. sensors/indoor_specs.json")
     args = p.parse_args()
 
+    global GRID_W, GRID_H, CELL_SIZE_M, LKP_X, LKP_Y, PRIOR_SIGMA, SENSOR_SPECS
+    if args.specs:
+        SENSOR_SPECS = {k: v for k, v in json.load(open(args.specs)).items() if not k.startswith("_")}
+    if args.grid:
+        GRID_W, GRID_H = (int(v) for v in args.grid.lower().split("x"))
+    if args.cell_m:
+        CELL_SIZE_M = args.cell_m
+    if args.lkp:
+        LKP_X, LKP_Y = (float(v) for v in args.lkp.split(","))
+    if args.sigma:
+        PRIOR_SIGMA = args.sigma
     ws_url = f"ws://{args.host}:{args.port}/ws"
     runner = run_hardware if args.hardware else run_stub
 

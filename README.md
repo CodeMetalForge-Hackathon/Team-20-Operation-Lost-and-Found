@@ -110,17 +110,20 @@ Hazard cells are rendered with coloured borders on the dashboard and routed arou
 
 ## Running on hardware (Jetson + Pi)
 
-```
-Jetson:
-  ./jetson/start.sh                    # ghost-core + Nav2 bridge + ROS2 nav stack
-  GHOST_ADDR=0.0.0.0:9001 ./jetson/start.sh   # expose to Pi over LAN
+**Full setup and bring-up steps: [INSTALL.md](INSTALL.md).** Short version:
 
-Pi:
-  cd sensors && python3 fusion.py --hardware --host <jetson-ip>
-  python3 pi/operator_link.py --host <jetson-ip>  # LoRa operator comms
+```
+Jetson:  bash jetson/setup.sh
+         DRIVE_ARGS="--ids … --signs=…" CELL_M=0.5 ORIGIN=0.5,0.5 bash jetson/start.sh
+Pi:      bash pi/hailo_setup.sh firmware|install|verify ; GHOST_HOST=<jetson> bash pi/setup.sh
+         GHOST_FRAMES=tcp://<jetson>:5555 python3 sensors/fusion.py --hardware --host <jetson> \
+             --grid 10x10 --cell-m 0.5 --specs sensors/indoor_specs.json
+         python3 pi/operator_link.py --host <jetson> --allow '<operator node id>'
 ```
 
-The bridge process (`jetson/ghost_bridge.py`) connects cuVSLAM odometry to GHOST Teleport, reads `next_waypoint` from every snapshot, and drives Nav2 there. CONTACT declarations are published to `/ghost/contact` and broadcast over LoRa to the field operator.
+On the Jetson, `jetson/launch/robot.launch.py` brings up the Gemini 330 depth camera, cuVSLAM odometry and a minimal Nav2: MPPI in omni mode for the mecanum base, with rolling-window costmaps fed by the depth point cloud. `jetson/base_driver.py` converts `/cmd_vel` into wheel speeds for the motor board (`jetson/motor_board.py`). It has a 0.4 s no-command stop, and `--identify` / `--spin-test` for checking the wiring. `jetson/frame_server.py` forwards camera frames to the Pi, where `sensors/detector.py` runs YOLOv8 on the Hailo AI HAT.
+
+The bridge (`jetson/ghost_bridge.py`) feeds odometry into GHOST and sends Nav2 to the centre of each next cell. It cancels the goal if the core stops answering. CONTACT is published on `/ghost/contact` and sent over LoRa to the operator.
 
 ---
 
@@ -142,16 +145,27 @@ ghost/
 │   ├── fusion.py           main loop — hardware or stub mode
 │   ├── imu.py              MPU-6050 / random-walk stub
 │   ├── thermal.py          MLX90640 / Pd(dist) stub
-│   ├── vision.py           YOLOv8-nano / Pd(dist) stub
+│   ├── vision.py           YOLOv8 person detection (Jetson frames or local camera) / stub
+│   ├── detector.py         YOLOv8 on Hailo or ONNX CPU
+│   ├── indoor_specs.json   short-range sensor models for indoor runs
 │   ├── acoustic.py         PyAudio FFT VAD / Pd(dist) stub
 │   └── ir.py               RPi.GPIO / 3 m-range stub
-├── jetson/                 Jetson — navigation bridge
-│   ├── ghost_bridge.py     cuVSLAM odom → GHOST Teleport + GHOST wp → Nav2
-│   ├── nav2_driver.py      clean Nav2 BasicNavigator wrapper
-│   ├── start.sh            launch script (core + bridge + ROS2 nav)
-│   └── requirements.txt
-├── pi/                     Pi — operator comms
-│   ├── operator_link.py    LoRa (Meshtastic) ↔ GHOST status relay
+├── jetson/                 Jetson — robot + navigation
+│   ├── launch/robot.launch.py  camera + cuVSLAM + Nav2 bringup
+│   ├── config/nav2_params.yaml Nav2 tuned for the mecanum base
+│   ├── base_driver.py      /cmd_vel → mecanum wheel speeds (dry-run by default)
+│   ├── motor_board.py      motor-controller serial protocol
+│   ├── teleop.py           keyboard driving for bench tests
+│   ├── frame_server.py     camera frames → Pi detector (ZMQ)
+│   ├── ghost_bridge.py     odometry → GHOST, GHOST waypoint → Nav2
+│   ├── nav2_driver.py      Nav2 BasicNavigator wrapper
+│   ├── setup.sh / start.sh install check / start everything
+│   └── test_hardware_layer.py
+├── pi/                     Pi — operator comms + setup
+│   ├── operator_link.py    LoRa (Meshtastic) ↔ GHOST, sender allowlist
+│   ├── setup.sh            Pi packages + models
+│   ├── hailo_setup.sh      Hailo AI HAT bring-up
+│   ├── get_models.sh       YOLOv8 models (Hailo .hef / ONNX)
 │   └── requirements.txt
 ├── dashboard/
 │   └── index.html          single-file live dashboard (no build step)

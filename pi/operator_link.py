@@ -96,8 +96,10 @@ class RadioLink:
     Thread-safe: recv() is non-blocking and can be polled from any thread.
     """
 
-    def __init__(self, mock: bool = False, dev: str | None = None) -> None:
+    def __init__(self, mock: bool = False, dev: str | None = None,
+                 allowed: set[str] | None = None) -> None:
         self._inbox     = queue.Queue()
+        self._allowed   = allowed or set()
         self._mock      = mock or os.environ.get("GHOST_LORA_MOCK") == "1"
         self._iface     = None
         self._last_tx   = 0.0
@@ -116,6 +118,8 @@ class RadioLink:
         try:
             import meshtastic.serial_interface
             from pubsub import pub
+            # pypubsub keeps weak references to listeners; bound methods of a
+            # live object are fine, but keep the object referenced (self).
             pub.subscribe(self._on_rx,   "meshtastic.receive.text")
             pub.subscribe(self._on_lost, "meshtastic.connection.lost")
             self._iface = meshtastic.serial_interface.SerialInterface(devPath=dev)
@@ -153,6 +157,9 @@ class RadioLink:
         try:
             text   = packet["decoded"]["text"]
             sender = packet.get("fromId", "?")
+            if self._allowed and sender not in self._allowed:
+                log.warning(f"[radio] ignored command from unlisted node {sender}")
+                return
             self._inbox.put((sender, text))
         except KeyError:
             pass
@@ -251,9 +258,10 @@ def _fmt_contact(c: dict) -> str:
 # ── operator link ─────────────────────────────────────────────────────────────
 
 class OperatorLink:
-    def __init__(self, ws_url: str, mock: bool, dev: str | None) -> None:
+    def __init__(self, ws_url: str, mock: bool, dev: str | None,
+                 allowed: set[str] | None = None) -> None:
         self._ws_url   = ws_url
-        self._radio    = RadioLink(mock=mock, dev=dev)
+        self._radio    = RadioLink(mock=mock, dev=dev, allowed=allowed)
         self._decoder  = CommandDecoder()
         self._last_contact_tx = 0.0
 
@@ -343,10 +351,16 @@ def main() -> None:
                     help="Mock LoRa radio — read commands from stdin")
     ap.add_argument("--dev",   default=None,
                     help="LoRa serial device (e.g. /dev/ttyUSB0); auto-detect if omitted")
+    ap.add_argument("--allow", default="",
+                    help="comma-separated Meshtastic node ids allowed to command the drone "
+                         "(e.g. '!a1b2c3d4'); empty = anyone on the channel (bench only)")
     args = ap.parse_args()
 
+    allowed = {a.strip() for a in args.allow.split(",") if a.strip()}
+    if not allowed and not args.mock:
+        log.warning("no --allow list: ANY node on the channel can halt/resume the drone")
     ws_url = f"ws://{args.host}:{args.port}/ws"
-    link   = OperatorLink(ws_url=ws_url, mock=args.mock, dev=args.dev)
+    link   = OperatorLink(ws_url=ws_url, mock=args.mock, dev=args.dev, allowed=allowed)
     try:
         asyncio.run(link.run())
     except KeyboardInterrupt:

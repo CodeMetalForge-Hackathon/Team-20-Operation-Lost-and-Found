@@ -1,74 +1,59 @@
 #!/usr/bin/env bash
-# GHOST Jetson setup — run once on a fresh Jetson Orin with ROS2 already installed.
-# Installs Rust, builds ghost-core, installs Python deps, clones the repo if needed.
+# GHOST Jetson setup — run once, inside the Isaac ROS environment
+# (the container/workspace that has orbbec_camera, isaac_ros_cuvslam and Nav2).
 #
-# Usage:
 #   bash jetson/setup.sh
-#   GHOST_REPO=git@github.com:CodeMetalForge-Hackathon/Team-20.git bash jetson/setup.sh
-
+#   GHOST_DIR=~/ghost GHOST_BRANCH=ghost-upgrade bash jetson/setup.sh
 set -euo pipefail
 
-GHOST_DIR="${GHOST_DIR:-$HOME/ghost}"
-GHOST_REPO="${GHOST_REPO:-https://github.com/CodeMetalForge-Hackathon/Team-20.git}"
-GHOST_BRANCH="${GHOST_BRANCH:-ghost}"
-ROS_DISTRO="${ROS_DISTRO:-humble}"
-
+GHOST_DIR="${GHOST_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 log() { echo "[setup] $*"; }
+fail=0
+check() { if eval "$2" >/dev/null 2>&1; then log "ok    $1"; else log "MISSING $1  — $3"; fail=1; fi; }
 
-# ── clone repo if not present ─────────────────────────────────────────────────
-if [ ! -d "$GHOST_DIR/.git" ]; then
-  log "cloning $GHOST_REPO → $GHOST_DIR"
-  git clone --branch "$GHOST_BRANCH" "$GHOST_REPO" "$GHOST_DIR"
-else
-  log "repo already present at $GHOST_DIR — pulling"
-  git -C "$GHOST_DIR" pull --ff-only
-fi
+# ── ROS 2 ─────────────────────────────────────────────────────────────────────
+ROS_DISTRO="${ROS_DISTRO:-$(ls /opt/ros 2>/dev/null | head -1)}"
+[ -n "$ROS_DISTRO" ] || { log "no ROS 2 under /opt/ros — run this inside the Isaac ROS container"; exit 1; }
+# shellcheck disable=SC1090
+source "/opt/ros/$ROS_DISTRO/setup.bash"
+WS="${ISAAC_ROS_WS:-/workspaces/isaac_ros-dev}"
+[ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash"
+log "ROS 2 $ROS_DISTRO, workspace $WS"
 
-# ── Rust ──────────────────────────────────────────────────────────────────────
-if ! command -v cargo &>/dev/null; then
+# ── Rust + ghost-core ─────────────────────────────────────────────────────────
+if ! command -v cargo >/dev/null 2>&1; then
   log "installing Rust"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-  # shellcheck disable=SC1090
-  source "$HOME/.cargo/env"
+fi
+# shellcheck disable=SC1091
+source "$HOME/.cargo/env" 2>/dev/null || true
+log "building ghost-core (release)"
+(cd "$GHOST_DIR/core" && cargo build --release)
+
+# ── Python ────────────────────────────────────────────────────────────────────
+log "installing Python packages"
+pip3 install --break-system-packages -r "$GHOST_DIR/jetson/requirements.txt" 2>/dev/null \
+  || pip3 install -r "$GHOST_DIR/jetson/requirements.txt"
+
+# ── motor board access ────────────────────────────────────────────────────────
+if [ -e /dev/ttyACM0 ]; then
+  [ -w /dev/ttyACM0 ] && log "ok    /dev/ttyACM0 writable" \
+    || log "MISSING write access to /dev/ttyACM0 — sudo usermod -aG dialout \$USER (then re-login), or run the container with --device /dev/ttyACM0"
 else
-  log "Rust $(rustc --version) already installed"
+  log "note  motor board not plugged in (/dev/ttyACM0) — base_driver will only dry-run"
 fi
 
-# ── build ghost-core ──────────────────────────────────────────────────────────
-log "building ghost-core (release)…"
-(
-  source "$HOME/.cargo/env" 2>/dev/null || true
-  cd "$GHOST_DIR/core"
-  cargo build --release
-)
-log "ghost-core binary: $GHOST_DIR/core/target/release/ghost-core"
+# ── ROS packages GHOST needs ──────────────────────────────────────────────────
+check "rclpy"                  "python3 -c 'import rclpy'"                       "source ROS 2"
+check "nav2_simple_commander"  "python3 -c 'import nav2_simple_commander'"       "apt install ros-$ROS_DISTRO-nav2-simple-commander"
+check "orbbec_camera"          "ros2 pkg prefix orbbec_camera"                    "build OrbbecSDK_ROS2 in $WS"
+check "isaac_ros_cuvslam"      "ros2 pkg prefix isaac_ros_cuvslam"                "apt install ros-$ROS_DISTRO-isaac-ros-visual-slam"
+for p in nav2_planner nav2_controller nav2_behaviors nav2_bt_navigator nav2_lifecycle_manager nav2_mppi_controller nav2_navfn_planner; do
+  check "$p" "ros2 pkg prefix $p" "apt install ros-$ROS_DISTRO-navigation2"
+done
+check "pyserial"               "python3 -c 'import serial'"                       "pip3 install pyserial"
+check "pyzmq"                  "python3 -c 'import zmq'"                          "pip3 install pyzmq"
 
-# ── Python deps (Jetson — no ROS2 packages here, they come with the distro) ──
-log "installing Python deps"
-pip3 install --break-system-packages "websockets>=11.0" 2>/dev/null \
-  || pip3 install "websockets>=11.0"
-
-# ── ROS2 environment check ────────────────────────────────────────────────────
-ROS_SETUP="/opt/ros/${ROS_DISTRO}/setup.bash"
-if [ ! -f "$ROS_SETUP" ]; then
-  log "WARNING: ROS2 $ROS_DISTRO not found at $ROS_SETUP"
-  log "         set ROS_DISTRO= to match your installed distro"
-else
-  # shellcheck disable=SC1090
-  source "$ROS_SETUP"
-  if python3 -c "import rclpy" 2>/dev/null; then
-    log "rclpy OK"
-  else
-    log "WARNING: rclpy not importable — check ROS2 Python path"
-  fi
-  if python3 -c "from nav2_simple_commander.robot_navigator import BasicNavigator" 2>/dev/null; then
-    log "nav2_simple_commander OK"
-  else
-    log "WARNING: nav2_simple_commander missing — install nav2 or build from source"
-  fi
-fi
-
-log "Jetson setup complete"
-log ""
-log "To start GHOST:"
-log "  cd $GHOST_DIR && bash jetson/start.sh"
+chmod +x "$GHOST_DIR"/jetson/*.sh "$GHOST_DIR"/jetson/*.py
+[ "$fail" = 0 ] && log "Jetson ready — next: bash jetson/start.sh (see INSTALL.md)" \
+               || log "fix the MISSING items above, then re-run"

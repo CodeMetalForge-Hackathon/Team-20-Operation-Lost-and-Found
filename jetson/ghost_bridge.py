@@ -1,22 +1,23 @@
 """
-GHOST Jetson bridge.
+GHOST Jetson bridge: ghost-core ⇄ ROS 2.
 
-Connects the GHOST Bayesian SAR engine running on this Jetson to:
-  - Visual-SLAM odometry  → GHOST Teleport  (accurate pose, overrides IMU DR)
-  - GHOST next_waypoint   → Nav2 goal       (drives the robot to the next cell)
-  - GHOST contact         → ROS2 topic      (broadcasts the find to the stack)
-  - GHOST status          → ROS2 topic      (live entropy / peak-P / hazards)
+  cuVSLAM odometry  → core teleport   (pose in GHOST grid metres)
+  core next_waypoint → Nav2 goal       (centre of the target cell, odom frame)
+  core contact       → /ghost/contact  (+ goal cancelled)
+  core status        → /ghost/status
 
-Run alongside ghost-core:
-  cargo run --release &
+Frames: GHOST's grid starts at its (0,0) corner; the robot's launch point is
+the odom origin.  --origin X,Y says where the launch point sits on the grid
+(metres), e.g. 0.5,0.5 to start half a metre in from the corner.
+
+Safety: if the core stops answering, the Nav2 goal is cancelled before
+reconnecting.  If the core reports a mission state (halted / idle /
+complete), the goal is cancelled; "returning" drives back to the launch point.
+
   python3 jetson/ghost_bridge.py
-
-Flags:
-  --ghost-ws  WS endpoint for GHOST core    (default: ws://localhost:9001/ws)
-  --odom      ROS2 odometry topic           (default: /visual_slam/tracking/odometry)
-  --cell-m    Grid cell side in metres      (default: 2.0 — must match GHOST Config)
-  --tol-m     Arrival tolerance in metres   (default: 0.4)
+  python3 jetson/ghost_bridge.py --origin 0.5,0.5 --cell-m 0.5
 """
+from __future__ import annotations
 
 import argparse
 import json
@@ -33,215 +34,167 @@ from websockets.sync.client import connect as ws_connect
 from nav2_driver import Nav2Driver
 
 log = logging.getLogger("ghost.bridge")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
+                    datefmt="%H:%M:%S")
 
-# ── defaults ──────────────────────────────────────────────────────────────────
 GHOST_WS    = "ws://localhost:9001/ws"
 ODOM_TOPIC  = "/visual_slam/tracking/odometry"
-CONTACT_PUB = "/ghost/contact"
-STATUS_PUB  = "/ghost/status"
-CELL_M      = 2.0
-TOL_M       = 0.4
 TELEPORT_HZ = 5.0
 POLL_HZ     = 4.0
+CORE_TIMEOUT_S = 3.0
 
-
-# ── shared pose (written by ROS2 subscriber, read by main loop) ───────────────
-
-class _Pose:
-    __slots__ = ("x", "y", "yaw", "fresh")
-
-    def __init__(self) -> None:
-        self.x = self.y = self.yaw = 0.0
-        self.fresh = False
-
-
-def _yaw_from_quat(q) -> float:
-    return math.atan2(
-        2.0 * (q.w * q.z + q.x * q.y),
-        1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-    )
-
-
-def _tx(ws, msg: dict) -> dict:
-    ws.send(json.dumps(msg))
-    return json.loads(ws.recv())
-
-
-# ── bridge ────────────────────────────────────────────────────────────────────
 
 class GhostBridge:
-    def __init__(self, ws_url: str, cell_m: float, tol_m: float, odom_topic: str) -> None:
-        self._ws_url   = ws_url
-        self._cell_m   = cell_m
-        self._tol_m    = tol_m
-
+    def __init__(self, args) -> None:
+        self.args = args
+        self.origin = tuple(float(v) for v in args.origin.split(","))
         rclpy.init()
-        self._node = rclpy.create_node("ghost_bridge")
-        self._rlog = self._node.get_logger()
+        self.node = rclpy.create_node("ghost_bridge")
+        self.rlog = self.node.get_logger()
+        self.pose = None                      # (x, y, frame) in odom
+        self.pose_fresh = False
+        self.node.create_subscription(Odometry, args.odom, self._on_odom, qos_profile_sensor_data)
+        self.contact_pub = self.node.create_publisher(String, "/ghost/contact", 10)
+        self.status_pub = self.node.create_publisher(String, "/ghost/status", 10)
+        self.nav = Nav2Driver(frame="odom")
+        self.active_goal = None               # cell tuple, or "home"
+        self.contact_declared = False
 
-        self._pose = _Pose()
-        self._node.create_subscription(
-            Odometry, odom_topic, self._on_odom, qos_profile_sensor_data
-        )
-        self._contact_pub = self._node.create_publisher(String, CONTACT_PUB, 10)
-        self._status_pub  = self._node.create_publisher(String, STATUS_PUB, 10)
+    # ── frames ────────────────────────────────────────────────────────────────
 
-        self._nav              = Nav2Driver()
-        self._active_wp: tuple | None = None   # (cell_x, cell_y) of current Nav2 goal
-        self._contact_declared = False
+    def to_grid(self, x: float, y: float) -> tuple[float, float]:
+        return x + self.origin[0], y + self.origin[1]
 
-    # ── ROS2 odom callback ─────────────────────────────────────────────────────
+    def to_odom(self, gx: float, gy: float) -> tuple[float, float]:
+        return gx - self.origin[0], gy - self.origin[1]
 
     def _on_odom(self, msg: Odometry) -> None:
-        p = msg.pose.pose
-        self._pose.x   = p.position.x
-        self._pose.y   = p.position.y
-        self._pose.yaw = _yaw_from_quat(p.orientation)
-        self._pose.fresh = True
+        p = msg.pose.pose.position
+        self.pose = (p.x, p.y)
+        self.nav.frame = msg.header.frame_id or "odom"
+        self.pose_fresh = True
 
-    # ── single iteration of the bridge loop ───────────────────────────────────
+    # ── core I/O ──────────────────────────────────────────────────────────────
 
-    def _tick(self, ws, now: float, t_odom: float, t_poll: float) -> tuple[float, float]:
-        """Run one pass of teleport + poll.  Returns updated (t_odom, t_poll)."""
-
-        rclpy.spin_once(self._node, timeout_sec=0.0)
-
-        # ── teleport: forward cuVSLAM pose to GHOST ───────────────────────────
-        if self._pose.fresh and now - t_odom >= 1.0 / TELEPORT_HZ:
-            _tx(ws, {
-                "type": "teleport",
-                "x":    round(self._pose.x, 3),
-                "y":    round(self._pose.y, 3),
-            })
-            self._pose.fresh = False
-            t_odom = now
-
-        # ── poll GHOST state → drive Nav2 ────────────────────────────────────
-        if now - t_poll >= 1.0 / POLL_HZ:
-            state = _tx(ws, {"type": "query"})
-            self._handle_state(state)
-            t_poll = now
-            self._nav.tick()
-
-        return t_odom, t_poll
-
-    # ── state handler ─────────────────────────────────────────────────────────
-
-    def _handle_state(self, state: dict) -> None:
-        contact = state.get("contact")
-
-        # ── contact declaration ───────────────────────────────────────────────
-        if contact and not self._contact_declared:
-            self._contact_declared = True
-            msg = String()
-            msg.data = json.dumps(contact)
-            self._contact_pub.publish(msg)
-            self._rlog.warning(
-                f"★ CONTACT ({contact['world_x']:.1f}m, {contact['world_y']:.1f}m) "
-                f"P={contact['probability']:.3f}  sensors={contact['sensors']}"
-            )
-
-        # ── publish live status ───────────────────────────────────────────────
-        s = String()
-        s.data = json.dumps({
-            "entropy":  round(state.get("entropy", 0.0), 3),
-            "peak_p":   round(state.get("max_probability", 0.0), 4),
-            "sweeps":   state.get("sweep_count", 0),
-            "elev_m":   round(state.get("elevation", 0.0), 2),
-            "hazards":  len(state.get("hazard_alerts", [])),
-            "contact":  contact is not None,
-        })
-        self._status_pub.publish(s)
-
-        # ── after contact, let the robot coast to a stop ───────────────────────
-        if self._contact_declared:
-            self._nav.cancel()
-            return
-
-        # ── pick up the GHOST waypoint and send it to Nav2 ────────────────────
-        wp = state.get("next_waypoint")
-        if wp is None:
-            return
-
-        wp_cell = (wp[0], wp[1])
-        wx = wp[0] * self._cell_m
-        wy = wp[1] * self._cell_m
-
-        dist = math.hypot(wx - self._pose.x, wy - self._pose.y)
-        if dist < self._tol_m:
-            return  # already here
-
-        if wp_cell != self._active_wp or self._nav.done():
-            yaw = math.atan2(wy - self._pose.y, wx - self._pose.x)
-            self._nav.navigate_to(wx, wy, yaw)
-            self._active_wp = wp_cell
-            self._rlog.info(
-                f"→ Nav2 cell{list(wp_cell)} "
-                f"({wx:.1f}m, {wy:.1f}m)  dist={dist:.1f}m"
-            )
-
-    # ── outer reconnect loop ──────────────────────────────────────────────────
+    def _call(self, ws, msg: dict) -> dict:
+        ws.send(json.dumps(msg))
+        return json.loads(ws.recv(timeout=CORE_TIMEOUT_S))
 
     def run(self) -> None:
-        self._rlog.info("waiting for Nav2 action servers…")
-        if not self._nav.wait_until_ready(timeout_sec=90.0):
-            self._rlog.error("Nav2 not ready after 90 s — aborting")
+        self.rlog.info("waiting for Nav2 (NavigateToPose)…")
+        if not self.nav.wait_until_ready(timeout_sec=120.0):
+            self.rlog.error("Nav2 not ready after 120 s — is robot.launch.py running with nav2:=true?")
             return
-        self._rlog.info("Nav2 ready")
-
+        self.rlog.info("Nav2 ready")
         while rclpy.ok():
             try:
-                with ws_connect(self._ws_url) as ws:
-                    self._rlog.info(f"GHOST connection open at {self._ws_url}")
-                    t_odom = t_poll = time.monotonic() - 999.0  # fire immediately
-                    while True:
-                        now = time.monotonic()
-                        t_odom, t_poll = self._tick(ws, now, t_odom, t_poll)
-                        time.sleep(0.02)   # 50 Hz spin
-            except Exception as exc:
-                self._rlog.warning(f"GHOST connection lost ({exc}), retrying in 2 s…")
+                with ws_connect(self.args.ghost_ws, max_size=None, open_timeout=5) as ws:
+                    ws.recv(timeout=CORE_TIMEOUT_S)          # initial snapshot
+                    self.rlog.info(f"core connected at {self.args.ghost_ws}")
+                    self._loop(ws)
+            except Exception as exc:                          # timeout, refused, closed…
+                self.nav.cancel()
+                self.active_goal = None
+                self.rlog.warning(f"core link lost ({exc!r}) — Nav2 goal cancelled, retrying in 2 s")
                 time.sleep(2.0)
 
-    # ── cleanup ───────────────────────────────────────────────────────────────
+    def _loop(self, ws) -> None:
+        t_tele = t_poll = 0.0
+        while rclpy.ok():
+            rclpy.spin_once(self.node, timeout_sec=0.0)
+            self.nav.tick()
+            now = time.monotonic()
+            if self.pose_fresh and now - t_tele >= 1.0 / TELEPORT_HZ:
+                gx, gy = self.to_grid(*self.pose)
+                self._call(ws, {"type": "teleport", "x": round(gx, 3), "y": round(gy, 3)})
+                self.pose_fresh = False
+                t_tele = now
+            if now - t_poll >= 1.0 / POLL_HZ:
+                self._handle(self._call(ws, {"type": "query"}))
+                t_poll = now
+            time.sleep(0.02)
+
+    # ── decisions ─────────────────────────────────────────────────────────────
+
+    def _handle(self, s: dict) -> None:
+        contact = s.get("contact")
+        self.status_pub.publish(String(data=json.dumps({
+            "mission": s.get("mission", "active"),
+            "entropy": round(s.get("entropy", 0.0), 3),
+            "peak_p": round(s.get("max_probability", 0.0), 4),
+            "sweeps": s.get("sweep_count", 0),
+            "contact": contact is not None,
+        })))
+
+        if contact and not self.contact_declared:
+            self.contact_declared = True
+            self.contact_pub.publish(String(data=json.dumps(contact)))
+            self.rlog.warning(f"★ CONTACT ({contact['world_x']:.1f}, {contact['world_y']:.1f}) m "
+                              f"P={contact['probability']:.3f}")
+        if not contact:
+            self.contact_declared = False
+        if self.contact_declared:
+            self._stop("contact")
+            return
+
+        mission = s.get("mission", "active")      # older cores have no mission state
+        if mission == "returning":
+            if self.active_goal != "home":
+                self.nav.navigate_to(0.0, 0.0)     # launch point = odom origin
+                self.active_goal = "home"
+                self.rlog.info("→ returning to launch point")
+            return
+        if mission != "active":
+            self._stop(mission)
+            return
+
+        wp = s.get("next_waypoint")
+        if wp is None or self.pose is None:
+            return
+        cell = s.get("cell_size_m") or self.args.cell_m
+        gx, gy = (wp[0] + 0.5) * cell, (wp[1] + 0.5) * cell     # cell centre, grid metres
+        ox, oy = self.to_odom(gx, gy)
+        dist = math.hypot(ox - self.pose[0], oy - self.pose[1])
+        tol = self.args.tol_m if self.args.tol_m is not None else cell / 3.0
+        if dist < tol:
+            return
+        cell_key = (wp[0], wp[1])
+        if cell_key != self.active_goal or self.nav.done():
+            yaw = math.atan2(oy - self.pose[1], ox - self.pose[0])
+            self.nav.navigate_to(ox, oy, yaw)
+            self.active_goal = cell_key
+            self.rlog.info(f"→ cell {list(cell_key)} = odom ({ox:.2f}, {oy:.2f}), {dist:.2f} m away")
+
+    def _stop(self, why: str) -> None:
+        if self.active_goal is not None:
+            self.nav.cancel()
+            self.active_goal = None
+            self.rlog.info(f"{why} — Nav2 goal cancelled")
 
     def destroy(self) -> None:
-        self._nav.destroy()
+        self.nav.destroy()
         try:
-            self._node.destroy_node()
-            rclpy.try_shutdown()
+            self.node.destroy_node()
         except Exception:
             pass
 
 
-# ── entry point ───────────────────────────────────────────────────────────────
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="GHOST Jetson bridge")
-    ap.add_argument("--ghost-ws", default=GHOST_WS,
-                    help="WebSocket endpoint for the GHOST core")
-    ap.add_argument("--odom",    default=ODOM_TOPIC,
-                    help="ROS2 odometry topic (cuVSLAM or wheel odom)")
-    ap.add_argument("--cell-m",  type=float, default=CELL_M,
-                    help="Grid cell side in metres (must match GHOST Config)")
-    ap.add_argument("--tol-m",   type=float, default=TOL_M,
-                    help="Arrival tolerance — stop sending Nav2 goals within this radius")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("--ghost-ws", default=GHOST_WS)
+    ap.add_argument("--odom", default=ODOM_TOPIC)
+    ap.add_argument("--cell-m", type=float, default=2.0,
+                    help="grid cell size if the core doesn't report it (must match the mission)")
+    ap.add_argument("--origin", default="0,0",
+                    help="X,Y metres: where the launch point sits on the GHOST grid")
+    ap.add_argument("--tol-m", type=float, default=None,
+                    help="don't re-send a goal closer than this (default: cell/3)")
     args = ap.parse_args()
-
-    bridge = GhostBridge(
-        ws_url=args.ghost_ws,
-        cell_m=args.cell_m,
-        tol_m=args.tol_m,
-        odom_topic=args.odom,
-    )
+    bridge = GhostBridge(args)
     try:
         bridge.run()
     except KeyboardInterrupt:
-        log.info("shutdown")
+        pass
     finally:
         bridge.destroy()
 
