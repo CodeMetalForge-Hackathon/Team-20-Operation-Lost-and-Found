@@ -10,7 +10,8 @@ Frames: GHOST's grid starts at its (0,0) corner; the robot's launch point is
 the odom origin.  --origin X,Y says where the launch point sits on the grid
 (metres), e.g. 0.5,0.5 to start half a metre in from the corner.
 
-Safety: if the core stops answering, the Nav2 goal is cancelled before
+Safety: the robot doesn't move until sensor data is flowing (the search has
+started); if the core stops answering, the Nav2 goal is cancelled before
 reconnecting.  If the core reports a mission state (halted / idle /
 complete), the goal is cancelled; "returning" drives back to the launch point.
 
@@ -59,6 +60,7 @@ class GhostBridge:
         self.nav = Nav2Driver(frame="odom")
         self.active_goal = None               # cell tuple, or "home"
         self.contact_declared = False
+        self.waiting_logged = False
 
     # ── frames ────────────────────────────────────────────────────────────────
 
@@ -137,7 +139,19 @@ class GhostBridge:
             self._stop("contact")
             return
 
-        mission = s.get("mission", "active")      # older cores have no mission state
+        mission = s.get("mission")
+        if mission is None:
+            # Cores without mission state plan waypoints from the moment they
+            # start.  Don't drive until the search has really begun — i.e.
+            # sensor data is flowing from the Pi.
+            if s.get("sweep_count", 0) == 0:
+                self._stop("waiting for the search to start (no sensor data yet)")
+                if not self.waiting_logged:
+                    self.rlog.info("holding still until the Pi's sensors start reporting")
+                    self.waiting_logged = True
+                return
+            self.waiting_logged = False
+            mission = "active"
         if mission == "returning":
             if self.active_goal != "home":
                 self.nav.navigate_to(0.0, 0.0)     # launch point = odom origin

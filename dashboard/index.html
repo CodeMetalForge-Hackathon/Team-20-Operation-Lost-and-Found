@@ -269,7 +269,9 @@
 
 <script>
 // ── config ───────────────────────────────────────────────────────────────────
-const WS_URL      = 'ws://localhost:9001/ws';
+// ?ws=ws://<jetson-ip>:9001/ws  to watch the robot;  ?cell=0.5  to match the mission's cell size
+const PARAMS      = new URLSearchParams(location.search);
+const WS_URL      = PARAMS.get('ws') || 'ws://localhost:9001/ws';
 const QUERY_MS    = 250;
 const CELL_PX     = 28;    // pixels per grid cell
 const MAX_ENTROPY = 6.0;   // log(400) ≈ 5.99
@@ -452,7 +454,7 @@ function updateContact(contact) {
 }
 
 // ── hazard overlay on canvas ──────────────────────────────────────────────────
-const HAZARD_CELL_M = 2.0;   // matches CELL_SIZE_M in fusion.py
+const HAZARD_CELL_M = parseFloat(PARAMS.get('cell') || '2.0');   // must match the mission's --cell-m
 
 const HAZARD_STYLE = {
   cliff_edge:    { stroke: '#ff1744', label: '!' },
@@ -515,6 +517,7 @@ function updateSensorDot(name, detection, confidence) {
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws     = null;
 let wsOk   = false;
+let pollTimer = null;
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -523,8 +526,9 @@ function connect() {
     wsOk = true;
     document.getElementById('ws-status').textContent   = 'CONNECTED';
     document.getElementById('ws-status').className     = 'connected';
-    // Poll for state updates
-    setInterval(() => {
+    // Poll for state updates (one timer, even across reconnects)
+    clearInterval(pollTimer);
+    pollTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'query' }));
       }

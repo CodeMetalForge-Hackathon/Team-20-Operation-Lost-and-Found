@@ -1,5 +1,7 @@
 # Installing GHOST on the robot
 
+After installing, follow the staged bench test in [bench/BENCH.md](bench/BENCH.md).
+
 What runs where:
 
 ```
@@ -110,6 +112,7 @@ bash jetson/start.sh
 | `ORIGIN` | where the launch point sits on the grid (m). Launch with the corner of the search area behind-right of the robot, facing +x along the grid |
 | `DRY_RUN=1` | wheels print instead of move |
 | `NO_NAV2=1` | camera and odometry only |
+| `NO_BRIDGE=1` | Nav2 up, but GHOST doesn't drive (for manual goals) |
 | `COLOR=1` | stream colour for the detector (more USB bandwidth) |
 
 Logs are in `jetson/logs/`: `core`, `robot`, `base`, `frames`, `bridge`.

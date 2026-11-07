@@ -5,6 +5,7 @@
 #   bash jetson/start.sh                        everything, wheels LIVE
 #   DRY_RUN=1 bash jetson/start.sh              wheels print instead of move
 #   NO_NAV2=1 bash jetson/start.sh              camera + odometry only (no driving)
+#   NO_BRIDGE=1 bash jetson/start.sh            Nav2 up but GHOST not driving (manual goals)
 #   CELL_M=0.5 ORIGIN=0.5,0.5 bash jetson/start.sh   indoor grid, launch 0.5 m in from the corner
 #   CAM_X=0.12 CAM_Z=0.10 bash jetson/start.sh  camera mount offset from robot centre (m)
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
@@ -64,8 +65,8 @@ FRAME_TOPIC=/camera/left_ir/image_raw/compressed
 [ "${COLOR:-false}" = "true" ] && FRAME_TOPIC=/camera/color/image_raw/compressed
 start frames python3 "$J/frame_server.py" --topic "$FRAME_TOPIC"
 
-# ── bridge (waits for Nav2 itself) ────────────────────────────────────────────
-if [ "$NAV2" = "true" ]; then
+# ── bridge (waits for Nav2, and drives only once the Pi's sensors report) ────
+if [ "$NAV2" = "true" ] && [ -z "${NO_BRIDGE:-}" ]; then
   sleep 2
   start bridge python3 "$J/ghost_bridge.py" --ghost-ws "ws://127.0.0.1:${GHOST_ADDR##*:}/ws" \
     --cell-m "$CELL_M" --origin "$ORIGIN"
