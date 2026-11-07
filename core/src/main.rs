@@ -1,6 +1,7 @@
 mod belief_map;
 mod dead_reckoning;
 mod engine;
+mod hazard;
 mod path_planner;
 mod sensor_model;
 mod server;

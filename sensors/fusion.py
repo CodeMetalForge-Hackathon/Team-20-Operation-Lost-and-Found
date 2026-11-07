@@ -52,8 +52,11 @@ def _sensor_msg(sensor_type: str, detection: bool, confidence: float) -> str:
     })
 
 
-def _imu_msg(ax: float, ay: float, gz: float, dt: float) -> str:
-    return json.dumps({"type": "imu", "ax": ax, "ay": ay, "gz": gz, "dt": dt})
+def _imu_msg(ax: float, ay: float, az: float, gz: float, dt: float) -> str:
+    return json.dumps({
+        "type": "imu",
+        "ax": ax, "ay": ay, "az": az, "gz": gz, "dt": dt,
+    })
 
 
 def _teleport_msg(x: float, y: float) -> str:
@@ -76,12 +79,16 @@ def _log_state(state: dict) -> None:
         f"P={c['probability']:.3f} conf={c['combined_confidence']:.3f} "
         f"sensors={c['sensors']}"
     ) if c else "none"
+    hazards = state.get("hazard_alerts", [])
+    hazard_str = f"{len(hazards)} alerts" if hazards else "clear"
     log.info(
-        "robot=(%.1f,%.1f) cell=%s wp=%s entropy=%.2f peak=%.4f sweeps=%d | %s",
+        "robot=(%.1f,%.1f) elev=%.2fm cell=%s wp=%s entropy=%.2f peak=%.4f "
+        "sweeps=%d terrain=%s | %s",
         state["robot_x"], state["robot_y"],
+        state.get("elevation", 0.0),
         state["robot_cell"], state["next_waypoint"],
         state["entropy"], state["max_probability"],
-        state["sweep_count"], contact_str,
+        state["sweep_count"], hazard_str, contact_str,
     )
 
 
@@ -116,7 +123,7 @@ async def run_hardware(ws_url: str) -> None:
 
             if now - t_imu >= imu_interval:
                 r = imu.read()
-                await ws.send(_imu_msg(r.ax, r.ay, r.gz, r.dt))
+                await ws.send(_imu_msg(r.ax, r.ay, r.az, r.gz, r.dt))
                 state = json.loads(await ws.recv())
                 for _, s in sensors:
                     s.update_robot_pos(state["robot_x"], state["robot_y"])
@@ -140,8 +147,11 @@ async def run_stub(ws_url: str) -> None:
     Stub / demo mode.
     Navigates the robot automatically toward next_waypoint, fires all
     four stub sensors, and converges to a CONTACT declaration.
+    Also sends synthetic IMU readings (with terrain events) so the
+    hazard detector fires even without real hardware.
     Subject is fixed at (SUBJECT_X, SUBJECT_Y).
     """
+    imu      = IMUSensor()
     thermal  = ThermalSensor()
     vision   = VisionSensor()
     acoustic = AcousticSensor()
@@ -185,6 +195,11 @@ async def run_stub(ws_url: str) -> None:
             # Update stub sensor positions
             for s in [thermal, vision, acoustic, ir_sens]:
                 s.update_robot_pos(robot_x, robot_y)
+
+            # Send IMU reading (triggers hazard detection + terrain events)
+            r = imu.read()
+            await ws.send(_imu_msg(r.ax, r.ay, r.az, r.gz, r.dt))
+            state = json.loads(await ws.recv())
 
             # Teleport robot to new position
             await ws.send(_teleport_msg(robot_x, robot_y))

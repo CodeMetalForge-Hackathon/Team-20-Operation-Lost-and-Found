@@ -3,14 +3,21 @@ use crate::{belief_map::BeliefMap, sensor_model::SensorType};
 pub struct PathPlanner;
 
 impl PathPlanner {
-    /// Next cell to visit: maximises P(c) / (1 + travel_weight * manhattan_dist)
+    /// Next cell to visit: maximises P(c) × hazard_weight(c) × sar_priority(c)
+    /// / (1 + travel_weight × manhattan_dist).
     /// Skips already-swept cells.
+    ///
+    /// `hazard_weights` is row-major (y * width + x), range 0.05–1.0.
+    /// `sar_boosts` is the same layout, range ≥ 1.0 (ravine priority uplift).
+    /// Pass slices of length width*height; empty slices → all weights = 1.
     pub fn next_waypoint(
-        map: &BeliefMap,
-        robot_cell: (usize, usize),
+        map:          &BeliefMap,
+        robot_cell:   (usize, usize),
+        hazard_weights: &[f64],
+        sar_boosts:   &[f64],
     ) -> Option<(usize, usize)> {
         let (rx, ry) = robot_cell;
-        let mut best = f64::NEG_INFINITY;
+        let mut best   = f64::NEG_INFINITY;
         let mut target = None;
 
         for y in 0..map.height {
@@ -19,12 +26,16 @@ impl PathPlanner {
                 let p = map.get(x, y);
                 if p < 1e-15 { continue; }
 
+                let idx = y * map.width + x;
+                let hw  = hazard_weights.get(idx).copied().unwrap_or(1.0);
+                let sb  = sar_boosts.get(idx).copied().unwrap_or(1.0);
+
                 let dist = ((x as isize - rx as isize).unsigned_abs()
                     + (y as isize - ry as isize).unsigned_abs()) as f64;
-                let score = p / (1.0 + 0.08 * dist);
+                let score = p * hw * sb / (1.0 + 0.08 * dist);
 
                 if score > best {
-                    best = score;
+                    best   = score;
                     target = Some((x, y));
                 }
             }

@@ -164,6 +164,13 @@
     margin-bottom: 6px;
   }
 
+  /* hazard alerts */
+  #hazard-list {
+    font-size: 0.70rem;
+    line-height: 1.6;
+    color: #546e7a;
+  }
+
   /* legend */
   #legend {
     display: flex;
@@ -205,8 +212,14 @@
       <h3>ROBOT</h3>
       <div class="stat-row"><span class="label">position</span><span class="value" id="s-pos">—</span></div>
       <div class="stat-row"><span class="label">cell</span><span class="value" id="s-cell">—</span></div>
+      <div class="stat-row"><span class="label">elevation</span><span class="value" id="s-elev">0.00m</span></div>
       <div class="stat-row"><span class="label">next waypoint</span><span class="value" id="s-wp">—</span></div>
       <div class="stat-row"><span class="label">sweeps</span><span class="value" id="s-sweeps">0</span></div>
+    </div>
+
+    <div class="stat-group">
+      <h3>TERRAIN</h3>
+      <div id="hazard-list">clear</div>
     </div>
 
     <div class="stat-group">
@@ -330,6 +343,11 @@ function render(state) {
     ctx.beginPath(); ctx.moveTo(0, y*CELL_PX); ctx.lineTo(gridW*CELL_PX, y*CELL_PX); ctx.stroke();
   }
 
+  // ── hazard overlays (drawn before robot so robot stays on top) ──
+  if (state.hazard_alerts && state.hazard_alerts.length > 0) {
+    drawHazards(state.hazard_alerts);
+  }
+
   // ── robot marker ──
   const [rcx, rcy] = state.robot_cell;
   const rx = rcx * CELL_PX + CELL_PX/2;
@@ -373,6 +391,8 @@ function render(state) {
     `(${state.robot_x.toFixed(1)}m, ${state.robot_y.toFixed(1)}m)`;
   document.getElementById('s-cell').textContent =
     `[${state.robot_cell[0]}, ${state.robot_cell[1]}]`;
+  document.getElementById('s-elev').textContent =
+    `${(state.elevation ?? 0).toFixed(2)}m`;
   document.getElementById('s-wp').textContent =
     state.next_waypoint ? `[${state.next_waypoint[0]}, ${state.next_waypoint[1]}]` : '—';
   document.getElementById('s-sweeps').textContent = state.sweep_count;
@@ -382,6 +402,9 @@ function render(state) {
   // entropy bar (high entropy = wide = uncertain)
   const entropyPct = Math.min(state.entropy / MAX_ENTROPY * 100, 100);
   document.getElementById('entropy-bar').style.width = entropyPct + '%';
+
+  // terrain hazard list
+  updateHazards(state.hazard_alerts || []);
 
   // contact overlay
   updateContact(state.contact);
@@ -426,6 +449,58 @@ function updateContact(contact) {
     `P: ${contact.probability.toFixed(4)}<br>` +
     `conf: ${(contact.combined_confidence * 100).toFixed(1)}%<br>` +
     `sensors: ${contact.sensors.join(', ')}`;
+}
+
+// ── hazard overlay on canvas ──────────────────────────────────────────────────
+const HAZARD_CELL_M = 2.0;   // matches CELL_SIZE_M in fusion.py
+
+const HAZARD_STYLE = {
+  cliff_edge:    { stroke: '#ff1744', label: '!' },
+  obstacle:      { stroke: '#ffd740', label: '+' },
+  steep_slope:   { stroke: '#ff9800', label: '/' },
+  ravine_bottom: { stroke: '#448aff', label: 'v' },
+};
+
+function drawHazards(alerts) {
+  for (const a of alerts) {
+    const hx = Math.floor(a.world_x / HAZARD_CELL_M) * CELL_PX;
+    const hy = Math.floor(a.world_y / HAZARD_CELL_M) * CELL_PX;
+    const s  = HAZARD_STYLE[a.hazard] || { stroke: '#fff', label: '?' };
+
+    ctx.strokeStyle = s.stroke;
+    ctx.lineWidth   = 3;
+    ctx.strokeRect(hx + 1.5, hy + 1.5, CELL_PX - 3, CELL_PX - 3);
+
+    ctx.fillStyle    = s.stroke;
+    ctx.font         = `bold ${Math.round(CELL_PX * 0.38)}px monospace`;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(s.label, hx + 3, hy + 2);
+  }
+}
+
+function updateHazards(alerts) {
+  const list = document.getElementById('hazard-list');
+  if (!alerts || alerts.length === 0) {
+    list.innerHTML = '<span style="color:#37474f">clear</span>';
+    return;
+  }
+  const colors = {
+    cliff_edge:    '#ff1744',
+    obstacle:      '#ffd740',
+    steep_slope:   '#ff9800',
+    ravine_bottom: '#448aff',
+  };
+  list.innerHTML = alerts.slice(-4).reverse().map(a => {
+    const col  = colors[a.hazard] || '#888';
+    const desc = a.description.length > 27
+      ? a.description.slice(0, 27) + '…'
+      : a.description;
+    const pos = `(${a.world_x.toFixed(0)}m,${a.world_y.toFixed(0)}m)`;
+    return `<div style="color:${col};margin-bottom:2px">`
+      + `&#9888; ${desc} ${pos}`
+      + `</div>`;
+  }).join('');
 }
 
 // ── sensor status update (called by fusion layer via "sensor_event" msg) ──────

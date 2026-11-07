@@ -1,14 +1,16 @@
 """
 IMU sensor — MPU-6050 via I2C (smbus2).
-Stub: smooth random-walk that keeps the robot roughly on course.
+Stub: smooth random-walk that keeps the robot roughly on course,
+with periodic terrain events to exercise hazard detection.
 """
 import math, random, time
 from dataclasses import dataclass
 
 @dataclass
 class IMUReading:
-    ax: float   # body-frame m/s², gravity removed
+    ax: float   # body-frame m/s², gravity removed (horizontal)
     ay: float
+    az: float   # body-frame m/s² — ~9.81 flat+stationary; <9.81 falling; >9.81 impact
     gz: float   # yaw rate rad/s
     dt: float   # sample interval s
 
@@ -28,6 +30,7 @@ class IMUSensor:
         self._speed    = stub_speed
         self._heading  = 0.0
         self._last_t   = time.monotonic()
+        self._tick     = 0
         self._hw       = False
 
         if _HW:
@@ -55,16 +58,29 @@ class IMUSensor:
 
         ax = s16(raw[0],  raw[1])  * _ACCEL_SCALE
         ay = s16(raw[2],  raw[3])  * _ACCEL_SCALE
+        az = s16(raw[4],  raw[5])  * _ACCEL_SCALE   # vertical specific force
         gz = s16(raw[12], raw[13]) * _GYRO_SCALE
-        return IMUReading(ax=ax, ay=ay, gz=gz, dt=dt)
+        return IMUReading(ax=ax, ay=ay, az=az, gz=gz, dt=dt)
 
     # ── stub ─────────────────────────────────────────────────────────────────
 
     def _read_stub(self, dt: float) -> IMUReading:
-        # Gentle random-walk heading, constant forward speed
+        self._tick += 1
         self._heading += random.gauss(0, 0.03)
         v  = self._speed
         ax = math.cos(self._heading) * random.gauss(v, 0.04)
         ay = math.sin(self._heading) * random.gauss(v, 0.04)
         gz = random.gauss(0, 0.01)
-        return IMUReading(ax=ax, ay=ay, gz=gz, dt=max(dt, 1e-3))
+
+        # Terrain events every 80 ticks — exercise hazard detection
+        # Phase 20-23: cliff (az drops, altitude falls)
+        # Phase 50-53: obstacle/impact (az spikes, altitude rises)
+        phase = self._tick % 80
+        if 20 <= phase <= 23:
+            az = 3.0 + random.gauss(0, 0.15)    # ~6.81 m/s² below gravity → falling
+        elif 50 <= phase <= 53:
+            az = 14.5 + random.gauss(0, 0.15)   # ~4.69 m/s² above gravity → impact
+        else:
+            az = 9.81 + random.gauss(0, 0.08)   # nominal flat terrain
+
+        return IMUReading(ax=ax, ay=ay, az=az, gz=gz, dt=max(dt, 1e-3))

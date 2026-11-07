@@ -1,43 +1,67 @@
 /// GPS-free position estimate via IMU integration.
-/// Uses a simple Madgwick-style heading update + trapezoidal
+/// Uses a simple heading update (gyro-integrated) + trapezoidal
 /// velocity/position integration.  Zero-velocity detection from
 /// accelerometer magnitude damps drift when the robot is stationary.
 #[derive(Debug, Clone)]
 pub struct DeadReckoning {
-    pub pos_x: f64,    // metres from origin
-    pub pos_y: f64,
-    pub vel_x: f64,    // m/s
-    pub vel_y: f64,
-    pub heading: f64,  // radians, 0 = +x axis, CCW positive
+    pub pos_x:         f64,    // metres from origin
+    pub pos_y:         f64,
+    pub vel_x:         f64,    // m/s
+    pub vel_y:         f64,
+    pub heading:       f64,    // radians, 0 = +x axis, CCW positive
+    pub altitude:      f64,    // metres, integrated from az
+    pub altitude_rate: f64,    // m/s — positive = rising
+    pub lateral_g:     f64,    // horizontal accel magnitude (m/s²) — slope indicator
+    alt_vel:           f64,    // internal vertical velocity integrator
 }
 
 impl DeadReckoning {
     pub fn new(start_x: f64, start_y: f64) -> Self {
-        Self { pos_x: start_x, pos_y: start_y, vel_x: 0.0, vel_y: 0.0, heading: 0.0 }
+        Self {
+            pos_x: start_x, pos_y: start_y,
+            vel_x: 0.0, vel_y: 0.0,
+            heading: 0.0,
+            altitude: 0.0, altitude_rate: 0.0, lateral_g: 0.0,
+            alt_vel: 0.0,
+        }
     }
 
     /// Process one IMU sample.
-    /// ax, ay : body-frame acceleration (m/s², gravity already removed)
-    /// gz      : yaw rate (rad/s, +CCW)
-    /// dt      : sample interval (s)
-    pub fn update(&mut self, ax: f64, ay: f64, gz: f64, dt: f64) {
-        // Integrate heading
+    ///
+    /// ax, ay : body-frame horizontal acceleration (m/s², gravity removed)
+    /// az     : body-frame vertical acceleration (m/s², ~9.81 when flat+stationary)
+    /// gz     : yaw rate (rad/s, +CCW)
+    /// dt     : sample interval (s)
+    pub fn update(&mut self, ax: f64, ay: f64, az: f64, gz: f64, dt: f64) {
+        // ── heading ──────────────────────────────────────────────────────────
         self.heading = (self.heading + gz * dt).rem_euclid(std::f64::consts::TAU);
 
-        // Rotate body-frame accel into world frame
+        // ── horizontal position ───────────────────────────────────────────────
         let (sh, ch) = self.heading.sin_cos();
         let world_ax = ch * ax - sh * ay;
         let world_ay = sh * ax + ch * ay;
 
-        // Zero-velocity update: damp velocity when accel magnitude is near zero
         let mag = (ax * ax + ay * ay).sqrt();
         let decay = if mag < 0.08 { 0.80 } else { 1.0 };
 
         self.vel_x = self.vel_x * decay + world_ax * dt;
         self.vel_y = self.vel_y * decay + world_ay * dt;
-
         self.pos_x += self.vel_x * dt;
         self.pos_y += self.vel_y * dt;
+
+        // Lateral accel magnitude → pitch/roll proxy for slope detection
+        self.lateral_g = mag;
+
+        // ── vertical / elevation ──────────────────────────────────────────────
+        // Accelerometer measures specific force: flat+stationary → az ≈ +9.81.
+        // Net vertical accel = az - 9.81 (removes gravity).
+        // Cliff: reaction force drops, az < 9.81, net < 0 → altitude falls.
+        // Obstacle/impact: az spikes > 9.81, net > 0 → altitude rises briefly.
+        let vert_net = az - 9.81;
+        let alt_damp = if vert_net.abs() < 0.15 { 0.85 } else { 1.0 };
+        self.alt_vel       = self.alt_vel * alt_damp + vert_net * dt;
+        self.altitude     += self.alt_vel * dt;
+        self.altitude_rate = self.alt_vel;
     }
 
     /// Hard-set position (used by sim / external fix).
@@ -55,10 +79,8 @@ impl DeadReckoning {
         (cx.min(width.saturating_sub(1)), cy.min(height.saturating_sub(1)))
     }
 
-    /// Terrain slope estimate from vertical accel spike (simple heuristic).
-    /// Returns passability weight 0–1 (1 = flat, lower = steep).
+    /// Passability weight from vertical accel deviation (simple heuristic).
     pub fn slope_weight(az_body: f64) -> f64 {
-        // az_body is deviation from 1g; large deviation → steep terrain
         let deviation = (az_body - 9.81).abs();
         (1.0 - (deviation / 9.81)).clamp(0.1, 1.0)
     }

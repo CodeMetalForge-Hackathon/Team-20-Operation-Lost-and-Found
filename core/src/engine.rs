@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     belief_map::BeliefMap,
     dead_reckoning::DeadReckoning,
+    hazard::{DangerAlert, HazardDetector},
     path_planner::PathPlanner,
     sensor_model::SensorType,
 };
@@ -30,6 +31,7 @@ pub enum IncomingMsg {
     Imu {
         ax: f64,
         ay: f64,
+        az: f64,   // vertical accel (m/s²) — ~9.81 when flat+stationary
         gz: f64,
         dt: f64,
     },
@@ -68,6 +70,8 @@ pub struct StateSnapshot {
     pub max_probability: f64,
     pub sweep_count: usize,
     pub contact: Option<Contact>,
+    pub elevation: f64,
+    pub hazard_alerts: Vec<DangerAlert>,
 }
 
 // ── Engine ───────────────────────────────────────────────────────────────────
@@ -75,10 +79,11 @@ pub struct StateSnapshot {
 const CONTACT_THRESHOLD: f64 = 0.20;
 
 pub struct GhostEngine {
-    pub map: BeliefMap,
-    pub dr: DeadReckoning,
+    pub map:         BeliefMap,
+    pub dr:          DeadReckoning,
+    pub hazard:      HazardDetector,
     pub sweep_count: usize,
-    pub contact: Option<Contact>,
+    pub contact:     Option<Contact>,
     /// Accumulates sensor triggers between position changes for fusion.
     pending: Vec<(SensorType, f64)>,
 }
@@ -91,7 +96,13 @@ impl GhostEngine {
     pub fn new() -> Self {
         let map = BeliefMap::new(20, 20, 2.0);
         let dr  = DeadReckoning::new(0.0, 0.0);
-        Self { map, dr, sweep_count: 0, contact: None, pending: Vec::new() }
+        Self {
+            map, dr,
+            hazard:      HazardDetector::new(),
+            sweep_count: 0,
+            contact:     None,
+            pending:     Vec::new(),
+        }
     }
 
     pub fn handle(&mut self, msg: IncomingMsg) {
@@ -106,6 +117,7 @@ impl GhostEngine {
                     prior_sigma_m.unwrap_or(15.0),
                 );
                 self.dr           = DeadReckoning::new(0.0, 0.0);
+                self.hazard       = HazardDetector::new();
                 self.sweep_count  = 0;
                 self.contact      = None;
                 self.pending.clear();
@@ -113,8 +125,15 @@ impl GhostEngine {
                     width, height, cell_size_m, last_known_x, last_known_y);
             }
 
-            IncomingMsg::Imu { ax, ay, gz, dt } => {
-                self.dr.update(ax, ay, gz, dt);
+            IncomingMsg::Imu { ax, ay, az, gz, dt } => {
+                self.dr.update(ax, ay, az, gz, dt);
+                self.hazard.check(
+                    self.dr.pos_x,
+                    self.dr.pos_y,
+                    self.dr.altitude,
+                    self.dr.altitude_rate,
+                    self.dr.lateral_g,
+                );
             }
 
             IncomingMsg::Teleport { x, y } => {
@@ -157,19 +176,37 @@ impl GhostEngine {
         let cell = self.dr.grid_cell(
             self.map.cell_size_m, self.map.width, self.map.height,
         );
-        let wp = PathPlanner::next_waypoint(&self.map, cell);
+
+        // Build per-cell hazard + SAR-priority weights for the path planner.
+        let n = self.map.width * self.map.height;
+        let mut hazard_weights = Vec::with_capacity(n);
+        let mut sar_boosts     = Vec::with_capacity(n);
+        for i in 0..n {
+            let x  = i % self.map.width;
+            let y  = i / self.map.width;
+            let wx = x as f64 * self.map.cell_size_m;
+            let wy = y as f64 * self.map.cell_size_m;
+            hazard_weights.push(self.hazard.terrain_weight(wx, wy));
+            sar_boosts.push(self.hazard.sar_priority(wx, wy));
+        }
+
+        let wp = PathPlanner::next_waypoint(
+            &self.map, cell, &hazard_weights, &sar_boosts,
+        );
         let (_, _, max_p) = self.map.peak();
 
         StateSnapshot {
-            grid:           self.map.as_grid(),
-            robot_x:        self.dr.pos_x,
-            robot_y:        self.dr.pos_y,
-            robot_cell:     [cell.0, cell.1],
-            next_waypoint:  wp.map(|(x, y)| [x, y]),
-            entropy:        self.map.entropy(),
+            grid:            self.map.as_grid(),
+            robot_x:         self.dr.pos_x,
+            robot_y:         self.dr.pos_y,
+            robot_cell:      [cell.0, cell.1],
+            next_waypoint:   wp.map(|(x, y)| [x, y]),
+            entropy:         self.map.entropy(),
             max_probability: max_p,
-            sweep_count:    self.sweep_count,
-            contact:        self.contact.clone(),
+            sweep_count:     self.sweep_count,
+            contact:         self.contact.clone(),
+            elevation:       self.dr.altitude,
+            hazard_alerts:   self.hazard.alerts.clone(),
         }
     }
 
