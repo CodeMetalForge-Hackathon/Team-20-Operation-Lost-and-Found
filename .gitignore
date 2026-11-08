@@ -5,3 +5,4 @@ models/
 jetson/logs/
 .demo-logs/
 jetson/config/mount_calibration.env*
+jetson/config/stack.env

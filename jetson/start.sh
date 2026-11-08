@@ -27,11 +27,23 @@
 #   FILTER_ARGS="--close 0.6" bash jetson/start.sh  obstacle_filter.py options (--help)
 #   DASH_PORT=8000 bash jetson/start.sh          dashboard served at http://<jetson-ip>:8000/
 #
+# Site settings: jetson/config/stack.env (optional, gitignored) holds VAR=value
+# lines for any of the above, e.g. COLOR=true — the way to set them for the
+# ghost-stack boot service without editing the unit.  The environment wins.
+#
 # Logs: jetson/logs/*.log      Stop: Ctrl-C (wheels are stopped on exit)
 set -uo pipefail
 
 GHOST_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 J="$GHOST_DIR/jetson"
+if [ -f "$J/config/stack.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
+    k="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
+    v="${v%\"}"; v="${v#\"}"                       # optional surrounding quotes
+    [ -z "${!k+x}" ] && export "$k=$v" && echo "[ghost] stack.env: $k=$v"
+  done < "$J/config/stack.env"
+fi
 LOGS="$J/logs"; mkdir -p "$LOGS"
 rm -f "$LOGS"/*.log   # no stale logs from a previous run (preflight reads them)
 GHOST_ADDR="${GHOST_ADDR:-0.0.0.0:9001}"          # 0.0.0.0 so the Pi can reach the core
