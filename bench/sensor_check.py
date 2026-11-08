@@ -75,10 +75,15 @@ def main() -> None:
                     row.append(f"{n} {'L' if live else 's'} {'HIT ' if det is True else 'miss' if det is False else ' -- '} {conf!s:>4} {rate}")
                 if writer:
                     writer.writerow([round(time.time(), 2), args.label, n, live, det, conf, extra])
+            if writer:
+                f.flush()   # every second: the run ends on Ctrl-C, and a sensor library may skip normal exit
             print("  " + " | ".join(row), flush=True)
             time.sleep(1.0 / args.hz)
     except KeyboardInterrupt:
         print("\n  hit rates:", {n: f"{100 * h / t:.0f}% of {t}" for n, (h, t) in hits.items() if t})
+    finally:
+        if writer:
+            f.close()
 
 
 if __name__ == "__main__":
