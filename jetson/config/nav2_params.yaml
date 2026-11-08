@@ -17,6 +17,8 @@ bt_navigator:
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     navigators: ["navigate_to_pose"]
+    # Forward-camera-safe tree: no BackUp, no costmap wiping (see the XML).
+    default_nav_to_pose_bt_xml: /workspaces/isaac_ros-dev/ghost/jetson/config/bt_nav_to_pose_forward_camera.xml
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
 
@@ -47,12 +49,16 @@ controller_server:
       model_dt: 0.067
       batch_size: 1000
       iteration_count: 1
-      motion_model: "Omni"           # mecanum: can strafe
-      Omni:                          # Nav2 Kilted+: motion models are plugins
-        plugin: "mppi::OmniMotionModel"
+      # DiffDrive although the base CAN strafe: the only obstacle sensor is a
+      # forward depth camera (~90 deg), so the robot must always move where it
+      # is looking. As Omni (strafe/reverse allowed) it moved sideways and
+      # backwards into things it could not see, and bumped them.
+      motion_model: "DiffDrive"
+      DiffDrive:                     # Nav2 Kilted+: motion models are plugins
+        plugin: "mppi::DiffDriveMotionModel"
       vx_max: 0.30
-      vx_min: -0.20
-      vy_max: 0.25
+      vx_min: 0.0                    # never reverse: nothing sees behind
+      vy_max: 0.0
       wz_max: 1.2
       ax_max: 0.6
       ax_min: -0.6
@@ -72,7 +78,7 @@ controller_server:
         collision_cost: 1000000.0
         near_goal_distance: 0.5
       PathAngleCritic:
-        mode: 2                       # holonomic: don't force facing along the path
+        mode: 0                       # face along the path (camera looks where it drives)
 
 planner_server:
   ros__parameters:
@@ -92,11 +98,9 @@ behavior_server:
     global_footprint_topic: global_costmap/published_footprint
     cycle_frequency: 10.0
     enable_stamped_cmd_vel: true
-    behavior_plugins: ["spin", "backup", "wait"]
+    behavior_plugins: ["spin", "wait"]   # no backup: it drives blind
     spin:
       plugin: "nav2_behaviors::Spin"
-    backup:
-      plugin: "nav2_behaviors::BackUp"
     wait:
       plugin: "nav2_behaviors::Wait"
     local_frame: odom
@@ -126,25 +130,38 @@ local_costmap:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
         publish_voxel_map: false
-        # Heights are in the odom frame, whose z = 0 is the CAMERA's start height
-        # (cuVSLAM base_frame = camera_link). Camera lens is 0.152 m above the
-        # floor, so the floor is at z = -0.152. Grid: -0.20 .. +0.60 (16 x 5 cm);
-        # the camera must sit inside it or obstacles are never cleared.
+        # Heights are in the odom frame, whose z = 0 plane is base_link's start
+        # plane (cuVSLAM base_frame = base_link, ground-constrained). The floor
+        # is at z = -0.004 and the camera at +0.143. Grid: -0.20 .. +0.60
+        # (16 x 5 cm); the camera must sit inside it or obstacles never clear.
         origin_z: -0.20
         z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 0.60
         mark_threshold: 0
-        observation_sources: depth
-        depth:
-          topic: /camera/depth/points
+        # jetson/obstacle_filter.py removes the floor in the ROBOT frame and
+        # gates far points on ego-motion, so the odom-height cut here is only
+        # the voxel grid's bottom: odometry drift can no longer turn the floor
+        # into obstacles. Marking and clearing come from separate clouds.
+        observation_sources: obstacles clearing
+        obstacles:
+          topic: /camera/obstacle_points
           data_type: "PointCloud2"
-          sensor_frame: ""
-          min_obstacle_height: -0.09    # 6 cm above the floor (z = -0.152)
-          max_obstacle_height: 0.60     # top of the voxel grid, 0.75 m above the floor
+          sensor_frame: camera_link
+          min_obstacle_height: -0.19
+          max_obstacle_height: 0.60     # top of the voxel grid, ~0.6 m above the floor
           obstacle_max_range: 3.0
-          raytrace_max_range: 3.5
           marking: true
+          clearing: false
+          expected_update_rate: 0.0
+        clearing:
+          topic: /camera/clearing_points  # all points incl. floor, 10 cm voxels
+          data_type: "PointCloud2"
+          sensor_frame: camera_link
+          min_obstacle_height: -0.19    # keep floor endpoints so rays reach them
+          max_obstacle_height: 0.60
+          raytrace_max_range: 3.5
+          marking: false
           clearing: true
           expected_update_rate: 0.0
       inflation_layer:
@@ -172,25 +189,38 @@ global_costmap:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
         publish_voxel_map: false
-        # Heights are in the odom frame, whose z = 0 is the CAMERA's start height
-        # (cuVSLAM base_frame = camera_link). Camera lens is 0.152 m above the
-        # floor, so the floor is at z = -0.152. Grid: -0.20 .. +0.60 (16 x 5 cm);
-        # the camera must sit inside it or obstacles are never cleared.
+        # Heights are in the odom frame, whose z = 0 plane is base_link's start
+        # plane (cuVSLAM base_frame = base_link, ground-constrained). The floor
+        # is at z = -0.004 and the camera at +0.143. Grid: -0.20 .. +0.60
+        # (16 x 5 cm); the camera must sit inside it or obstacles never clear.
         origin_z: -0.20
         z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 0.60
         mark_threshold: 0
-        observation_sources: depth
-        depth:
-          topic: /camera/depth/points
+        # jetson/obstacle_filter.py removes the floor in the ROBOT frame and
+        # gates far points on ego-motion, so the odom-height cut here is only
+        # the voxel grid's bottom: odometry drift can no longer turn the floor
+        # into obstacles. Marking and clearing come from separate clouds.
+        observation_sources: obstacles clearing
+        obstacles:
+          topic: /camera/obstacle_points
           data_type: "PointCloud2"
-          sensor_frame: ""
-          min_obstacle_height: -0.09    # 6 cm above the floor (z = -0.152)
-          max_obstacle_height: 0.60     # top of the voxel grid, 0.75 m above the floor
+          sensor_frame: camera_link
+          min_obstacle_height: -0.19
+          max_obstacle_height: 0.60     # top of the voxel grid, ~0.6 m above the floor
           obstacle_max_range: 3.0
-          raytrace_max_range: 3.5
           marking: true
+          clearing: false
+          expected_update_rate: 0.0
+        clearing:
+          topic: /camera/clearing_points  # all points incl. floor, 10 cm voxels
+          data_type: "PointCloud2"
+          sensor_frame: camera_link
+          min_obstacle_height: -0.19    # keep floor endpoints so rays reach them
+          max_obstacle_height: 0.60
+          raytrace_max_range: 3.5
+          marking: false
           clearing: true
           expected_update_rate: 0.0
       inflation_layer:
@@ -198,3 +228,52 @@ global_costmap:
         inflation_radius: 0.35
         cost_scaling_factor: 4.0
       always_send_full_costmap: true
+
+# Collision Monitor: last word on velocity. Nav2's controller and behaviours
+# publish /cmd_vel_nav; this node passes it on to /cmd_vel (the base driver)
+# after checking the RAW floor-free candidates from obstacle_filter.py, so it
+# reacts at once to anything near, confirmed or not.
+#   SlowZone:      anything within 0.6 m of the robot centre → half speed
+#   FootprintApproach: limits speed so the robot circle (r 0.18 m) would not
+#                  touch any point within 1.2 s; moving AWAY is never blocked,
+#                  so it can't trap the robot against a wall like a stop zone.
+# If the source goes quiet for source_timeout, the robot is stopped.
+collision_monitor:
+  ros__parameters:
+    base_frame_id: base_link
+    odom_frame_id: odom
+    cmd_vel_in_topic: cmd_vel_nav
+    cmd_vel_out_topic: cmd_vel
+    state_topic: collision_monitor_state
+    enable_stamped_cmd_vel: true
+    transform_tolerance: 0.3
+    source_timeout: 1.0
+    base_shift_correction: true
+    stop_pub_timeout: 2.0
+    polygons: ["SlowZone", "FootprintApproach"]
+    SlowZone:
+      type: circle
+      radius: 0.6
+      action_type: slowdown
+      slowdown_ratio: 0.5
+      min_points: 4
+      visualize: true
+      polygon_pub_topic: collision_monitor/slow_zone
+      enabled: true
+    FootprintApproach:
+      type: circle
+      radius: 0.18
+      action_type: approach
+      min_points: 4
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      visualize: true
+      polygon_pub_topic: collision_monitor/footprint
+      enabled: true
+    observation_sources: ["candidates"]
+    candidates:
+      type: pointcloud
+      topic: /camera/obstacle_candidates
+      min_height: 0.03                # base_link frame: floor is at -0.004
+      max_height: 0.60
+      enabled: true

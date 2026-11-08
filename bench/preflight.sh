@@ -44,12 +44,19 @@ TF_OUT="$(timeout 6 ros2 run tf2_ros tf2_echo odom base_link 2>/dev/null)"
 if grep -q Translation <<<"$TF_OUT"; then
   pass "TF odom → base_link"
 else
-  fail "no TF odom → base_link (cuVSLAM not tracking, or camera_link→base_link missing)"
+  fail "no TF odom → base_link (cuVSLAM not tracking, or base_link→camera_link mount TF missing)"
 fi
+
+check_rate "obstacle filter" /camera/obstacle_candidates 5
+grep -q "floor fit" "$LOGS/filter.log" 2>/dev/null && \
+  pass "filter: $(grep "floor fit" "$LOGS/filter.log" | tail -1 | sed 's/.*\] //; s/ |.*//')" || \
+  warn "obstacle filter hasn't reported yet (jetson/logs/filter.log)"
 
 echo "navigation"
 if ros2 action list 2>/dev/null | grep -q navigate_to_pose; then pass "Nav2 NavigateToPose available"
 else warn "Nav2 not up (normal with NO_NAV2=1; otherwise see jetson/logs/robot.log)"; fi
+if ros2 lifecycle get /collision_monitor 2>/dev/null | grep -q active; then pass "collision monitor active (/cmd_vel_nav → /cmd_vel)"
+else warn "collision monitor not active — Nav2 commands won't reach the wheels"; fi
 grep -q "Nav2 ready" "$LOGS/bridge.log" 2>/dev/null && pass "bridge sees Nav2" || warn "bridge hasn't reported 'Nav2 ready'"
 grep -q "core connected" "$LOGS/bridge.log" 2>/dev/null && pass "bridge connected to core" || warn "bridge not connected to core yet"
 

@@ -9,8 +9,12 @@
 #   CELL_M=0.5 ORIGIN=0.5,0.5 bash jetson/start.sh   indoor grid, launch 0.5 m in from the corner
 #   CAM_X=0.12 CAM_Z=0.10 bash jetson/start.sh  camera mount offset from robot centre (m)
 #                                               default: measured mount, 6.35 cm ahead, 14.2875 cm up
+#   CAM_PITCH=-1.2 bash jetson/start.sh          camera pitch, deg, ROS sign (+ = nose down)
+#                                               default: -1.2 (1.2° nose-UP), measured from the floor
+#                                               plane in the depth cloud, 2026-11-08
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
 #                                               default: this robot, from base_driver.py --identify
+#   FILTER_ARGS="--close 0.6" bash jetson/start.sh  obstacle_filter.py options (--help)
 #   DASH_PORT=8000 bash jetson/start.sh          dashboard served at http://<jetson-ip>:8000/
 #
 # Logs: jetson/logs/*.log      Stop: Ctrl-C (wheels are stopped on exit)
@@ -84,7 +88,15 @@ GHOST_ADDR="$GHOST_ADDR" start core "$CORE_BIN"
 # ── robot: camera + cuVSLAM (+ Nav2) ──────────────────────────────────────────
 NAV2=true; [ -n "${NO_NAV2:-}" ] && NAV2=false
 start robot ros2 launch "$J/launch/robot.launch.py" nav2:="$NAV2" \
-  color:="${COLOR:-false}" cam_x:="${CAM_X:-0.0635}" cam_z:="${CAM_Z:-0.142875}"
+  color:="${COLOR:-false}" cam_x:="${CAM_X:-0.0635}" cam_z:="${CAM_Z:-0.142875}" \
+  cam_pitch_deg:="${CAM_PITCH:--1.2}"
+
+# ── obstacle filter: floor removed in the robot frame + ego-motion check ─────
+# Feeds Nav2's costmaps and Collision Monitor (see jetson/obstacle_filter.py).
+# Without it the Collision Monitor's source times out and the robot won't move.
+if [ "$NAV2" = "true" ]; then
+  start filter python3 "$J/obstacle_filter.py" ${FILTER_ARGS:-}
+fi
 
 # ── wheels ────────────────────────────────────────────────────────────────────
 HW=(--hardware); [ -n "${DRY_RUN:-}" ] && HW=()

@@ -5,12 +5,18 @@ GHOST robot bringup (Jetson, inside the Isaac ROS environment).
   ros2 launch jetson/launch/robot.launch.py nav2:=false      camera + cuVSLAM only (odometry bench test)
   ros2 launch jetson/launch/robot.launch.py color:=true      also stream colour (better person detection)
   ros2 launch jetson/launch/robot.launch.py cam_x:=0.12 cam_z:=0.10   camera mount offset (MEASURE)
+  ros2 launch jetson/launch/robot.launch.py cam_pitch_deg:=-1.2        camera mount pitch (MEASURE)
 
-Frames:  odom → camera_link (cuVSLAM)  →  base_link (static, from cam_x/cam_z)
+Frames:  odom → base_link (cuVSLAM)  →  camera_link (static mount: cam_x, cam_z, cam_pitch_deg)
+         cuVSLAM tracks base_link, so odom's z = 0 plane is base_link's start
+         plane — the floor plane, if the mount pitch is right — and the ground
+         constraint keeps the robot on it.
          map → odom (static identity; there is no global map — GHOST's grid is
          anchored at the launch point, which is the odom origin)
-Topics:  /visual_slam/tracking/odometry   pose for the GHOST bridge
-         /camera/depth/points              obstacles for Nav2's costmaps
+Topics:  /visual_slam/tracking/odometry   pose for the GHOST bridge (ground-constrained)
+         /camera/depth/points              → jetson/obstacle_filter.py (started by start.sh)
+                                           → /camera/obstacle_points etc. for Nav2
+         /cmd_vel_nav → collision_monitor → /cmd_vel (base driver)
          /camera/left_ir/image_raw/compressed  frames for the Pi detector
 
 Nav2 runs only the servers GHOST uses (planner, controller, behaviours,
@@ -25,6 +31,7 @@ from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDesc
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration as Cfg
+from launch.substitutions import PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
@@ -35,7 +42,15 @@ NAV2_NODES = [
     ("nav2_controller", "controller_server"),
     ("nav2_behaviors", "behavior_server"),
     ("nav2_bt_navigator", "bt_navigator"),
+    ("nav2_collision_monitor", "collision_monitor"),
 ]
+# Controller and behaviours publish /cmd_vel_nav; the Collision Monitor checks
+# it against nearby obstacles and is the only Nav2 node publishing /cmd_vel.
+# If the monitor isn't active, nothing reaches the wheels (fails safe).
+NAV2_REMAPS = {
+    "controller_server": [("cmd_vel", "cmd_vel_nav")],
+    "behavior_server": [("cmd_vel", "cmd_vel_nav")],
+}
 
 
 def static_tf(parent, child, x="0", y="0", z="0", yaw="0"):
@@ -54,6 +69,8 @@ def generate_launch_description():
                               description="m: camera ahead of base_link (robot centre)"),
         DeclareLaunchArgument("cam_z", default_value="0.0",
                               description="m: camera above base_link"),
+        DeclareLaunchArgument("cam_pitch_deg", default_value="0.0",
+                              description="deg: camera pitch on the robot, ROS sign (+ = nose DOWN)"),
         DeclareLaunchArgument("nav2_params", default_value=DEFAULT_NAV2_PARAMS),
     ]
 
@@ -78,12 +95,16 @@ def generate_launch_description():
                 "rectified_images": True,
                 "enable_image_denoising": False,
                 "enable_localization_n_mapping": False,
-                "base_frame": "camera_link",
+                "base_frame": "base_link",   # odom/ground plane = robot frame, not the (tilted) camera
                 "odom_frame": "odom",
                 "publish_odom_to_base_tf": True,
                 "publish_map_to_odom_tf": False,     # we publish a static identity instead
                 "image_qos": "SENSOR_DATA",
                 "image_jitter_threshold_ms": 120.0,
+                # Keep odometry on the floor plane: no height drift or tilt.
+                # Unconstrained, cuVSLAM drifted ±0.15 m in z and ~2° in pitch,
+                # which lifted the floor into the costmap as a wall.
+                "enable_ground_constraint_in_odometry": True,
             }],
             remappings=[
                 ("visual_slam/image_0", "/camera/left_ir/image_raw"),
@@ -92,15 +113,17 @@ def generate_launch_description():
                 ("visual_slam/camera_info_1", "/camera/right_ir/camera_info"),
             ])])
 
-    # base_link sits behind/below the camera: child pose in parent frame
+    # Camera mount on the robot: camera_link's pose in base_link (robot centre,
+    # level).  base_link is the parent so cuVSLAM can publish odom → base_link.
+    cam_pitch_rad = PythonExpression([Cfg("cam_pitch_deg"), " * 3.141592653589793 / 180.0"])
     base_tf = Node(package="tf2_ros", executable="static_transform_publisher",
-                   name="tf_camera_to_base",
-                   arguments=["--x", ["-", Cfg("cam_x")], "--y", "0", "--z", ["-", Cfg("cam_z")],
-                              "--roll", "0", "--pitch", "0", "--yaw", "0",
-                              "--frame-id", "camera_link", "--child-frame-id", "base_link"])
+                   name="tf_base_to_camera",
+                   arguments=["--x", Cfg("cam_x"), "--y", "0", "--z", Cfg("cam_z"),
+                              "--roll", "0", "--pitch", cam_pitch_rad, "--yaw", "0",
+                              "--frame-id", "base_link", "--child-frame-id", "camera_link"])
 
     nav2_nodes = [Node(package=pkg, executable=exe, name=exe, output="screen",
-                       parameters=[Cfg("nav2_params")])
+                       parameters=[Cfg("nav2_params")], remappings=NAV2_REMAPS.get(exe, []))
                   for pkg, exe in NAV2_NODES]
     lifecycle = Node(package="nav2_lifecycle_manager", executable="lifecycle_manager",
                      name="lifecycle_manager_navigation", output="screen",
