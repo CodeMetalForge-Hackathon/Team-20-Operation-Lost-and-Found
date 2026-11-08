@@ -33,7 +33,7 @@ Then, in order:
     (the VLM is re-asked from close up; a "no" there rejects it);
   - else turn to look within ±90° of the start heading (45° steps); nothing
     to do after that ends the hunt.
-Annotated looks: --out (default /tmp/can_hunt).  Ctrl-C cancels Nav2 goals.
+Annotated looks: --out/run_<time>/ (default /workspaces/isaac_ros-dev/ghost_runs/can_hunt).  Ctrl-C cancels Nav2 goals.
 """
 import argparse
 import base64
@@ -370,8 +370,9 @@ def main():
     ap.add_argument("--merge", type=float, default=0.25, help="m, detections this close are the same can")
     ap.add_argument("--nav-timeout", type=float, default=90.0)
     ap.add_argument("--max-cans", type=int, default=12)
-    ap.add_argument("--out", default="/tmp/can_hunt")
+    ap.add_argument("--out", default="/workspaces/isaac_ros-dev/ghost_runs/can_hunt")
     a, ros_args = ap.parse_known_args()
+    a.out = os.path.join(a.out, time.strftime("run_%Y%m%d_%H%M%S"))   # one folder per run: never overwrite
     os.makedirs(a.out, exist_ok=True)
 
     rclpy.init(args=ros_args)

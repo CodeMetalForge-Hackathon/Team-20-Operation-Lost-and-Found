@@ -666,7 +666,7 @@ def main():
     ap.add_argument("--box-max", type=float, default=1.0, help="m: clusters wider are 'large' (walls, furniture)")
     ap.add_argument("--box-near", type=float, default=1.0,
                     help="m: boxes this close to a cup or the path between cups are logged")
-    ap.add_argument("--out", default="/tmp/cup_weave")
+    ap.add_argument("--out", default="/workspaces/isaac_ros-dev/ghost_runs/cup_weave")
     a, ros_args = ap.parse_known_args()
     run_dir = os.path.join(a.out, time.strftime("run_%Y%m%d_%H%M%S"))
     os.makedirs(run_dir, exist_ok=True)

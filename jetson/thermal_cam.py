@@ -19,7 +19,7 @@ clockwise (0/90/180/270, default 0) before anything is published.
            topic, so the Pi's person detector (sensors/vision.py) sees thermal
            frames instead of the depth camera's (THERMAL_YOLO=false keeps those).
 
-  python3 jetson/thermal_cam.py --test            one capture, no ROS: PNGs + stats in /tmp/thermal_test
+  python3 jetson/thermal_cam.py --test            one capture, no ROS: PNGs + stats in ghost_runs/thermal_test/run_<time>
   python3 jetson/thermal_cam.py                   ROS node
   python3 jetson/thermal_cam.py --device /dev/video3 --rotate 270
 
@@ -202,7 +202,7 @@ def test(a):
             data, _ = cap.read()
     finally:
         cap.close()
-    out = a.out
+    out = os.path.join(a.out, time.strftime("run_%Y%m%d_%H%M%S"))   # one folder per test: never overwrite
     os.makedirs(out, exist_ok=True)
     picture, raw = split(data, cap.w, cap.h)
     np.save(f"{out}/raw_u16.npy", raw)
@@ -288,7 +288,7 @@ def main():
                     help="°C 'lo,hi' mapped to black–white with --source temp")
     ap.add_argument("--colormap", default="none", help="none, inferno, jet, … (YOLO usually does best on grey)")
     ap.add_argument("--test", action="store_true", help="one capture without ROS: images + stats")
-    ap.add_argument("--out", default="/tmp/thermal_test")
+    ap.add_argument("--out", default="/workspaces/isaac_ros-dev/ghost_runs/thermal_test")
     a = ap.parse_args()
     test(a) if a.test else node(a)
 
