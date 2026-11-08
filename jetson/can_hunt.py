@@ -129,7 +129,7 @@ def vlm_brand(url, crop, timeout):
     s = 384 / max(h, w)
     crop = cv2.resize(crop, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_CUBIC)
     ok, jpg = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    body = {"model": "smolvlm-500m", "temperature": 0, "max_tokens": 12,
+    body = {"model": "smolvlm-500m", "temperature": 0, "cache_prompt": False, "max_tokens": 12,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}},
                 {"type": "text", "text": "What brand is the drink can in this picture? Answer with the brand name only."}]}]}

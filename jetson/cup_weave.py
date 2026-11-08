@@ -49,17 +49,34 @@ logged — when first seen and in the summary — relative to their nearest cup,
 that cup's travel frame (ahead/behind, left/right), and whether they lie
 between two consecutive cups; everything else is only in map.json.
 
+Shape cups: cups that are NOT red or blue (--plain-colours) carry a drawn
+triangle or circle.  YOLO's box of such a cup is cropped tight (10 % margin)
+from the full colour frame and SmolVLM on the Pi (--vlm, llama.cpp) is asked
+"What shape is drawn on the cup?"; the answer maps to triangle (triangle) or
+circle (circle/O/oval/round; square/rectangle count half — that is how SmolVLM
+misreads a small circle).  Asks run in a background thread (~6 s each on the
+Pi), are repeated when the cup looks --vlm-regrow× bigger than at the last ask
+(up to --vlm-asks), and vote weighted by box height.  A cup's CLASS is then
+'triangle' / 'circle' (or its colour for red/blue cups, and while undecided);
+--colours and --stop-colour take classes as well as colours, e.g.
+--colours triangle --stop-colour circle.  White shape cups often read 'grey'
+(the --skip-colours default): a skipped colour still counts once the VLM has
+named a shape and YOLO has found it --shape-min-dets times (only depth-backed
+boxes are asked about: SmolVLM names a shape even on an empty crop).  Searches wait (--vlm-wait) for pending asks before deciding.
+
 Output: --out/run_<time>/: map.json (cups, passes, boxes, path), map.png (top
 view), pass_<n>.jpg (frame at each pass), look_<n>.jpg (annotated looks).
 Ctrl-C cancels Nav2 goals and stops the wheels.
 """
 import argparse
+import base64
 import json
 import math
 import os
 import threading
 import time
 import urllib.request
+import queue
 from collections import deque
 
 import cv2
@@ -78,6 +95,7 @@ from can_hunt import Hunter, tf_mat
 
 CUP_RADIUS = 0.04
 BOX_GRID = 0.05
+UNSATURATED = {"grey", "white", "clear"}
 BGR = {"red": (40, 40, 220), "orange": (0, 140, 255), "yellow": (0, 220, 230), "green": (60, 180, 60),
        "blue": (220, 120, 30), "purple": (180, 50, 150), "pink": (180, 120, 255), "white": (235, 235, 235),
        "clear": (200, 200, 160), "grey": (140, 140, 140)}
@@ -117,6 +135,125 @@ def detect_remote(url, img, tile, timeout):
     return res["dets"], res["ms"], (time.time() - t0) * 1000
 
 
+# ── shape classification (SmolVLM on the Pi) ─────────────────────────────────
+SHAPE_PROMPT = "What shape is drawn on the cup? Answer with one word."
+SHAPE_WORDS = [("triangle", "triangle", 1.0), ("circle", "circle", 1.0), ("oval", "circle", 1.0),
+               ("ellipse", "circle", 1.0), ("round", "circle", 1.0), ("ring", "circle", 1.0),
+               ("square", "circle", 0.5), ("rectangle", "circle", 0.5)]
+
+
+def shape_crop(img, box, margin=0.1, size=384):
+    """Tight crop of a YOLO box (tests: wider crops make SmolVLM call a small circle 'square'), scaled up."""
+    x1, y1, x2, y2 = box; w, h = x2 - x1, y2 - y1
+    c = img[max(0, int(y1 - margin * h)):int(y2 + margin * h), max(0, int(x1 - margin * w)):int(x2 + margin * w)]
+    if c.size == 0:
+        return None
+    s = size / max(c.shape[:2])
+    return cv2.resize(c, (max(1, int(c.shape[1] * s)), max(1, int(c.shape[0] * s))), interpolation=cv2.INTER_CUBIC)
+
+
+def parse_shape(ans):
+    """VLM answer → (shape or None, weight)."""
+    a = ans.lower().strip().rstrip(".!")
+    for word, shape, w in SHAPE_WORDS:
+        if word in a:
+            return shape, w
+    if a in ("o", "0"):
+        return "circle", 1.0
+    return None, 0.0
+
+
+def vlm_shape(url, crop, timeout):
+    """→ raw answer"""
+    ok, jpg = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    body = {"model": "smolvlm-500m", "temperature": 0, "cache_prompt": False, "max_tokens": 8,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}},
+                {"type": "text", "text": SHAPE_PROMPT}]}]}
+    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)["choices"][0]["message"]["content"].strip()
+
+
+class ShapeClassifier:
+    """Background SmolVLM asks, one at a time; at most one queued per cup (the newest crop wins)."""
+
+    def __init__(self, a, run_dir):
+        self.a, self.run_dir = a, run_dir
+        self.cv = threading.Condition()
+        self.pending = {}                  # cup id → (cup, crop, box h, dist)
+        self.busy = None
+        self.n = 0
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def eligible(self, c):
+        return c.colour not in self.a.plain_colours and not c.passed
+
+    def offer(self, c, img, det):
+        """Queue an ask if this view is worth one (eligible cup, big enough, bigger than the last ask)."""
+        x1, y1, x2, y2 = det["box"]; h = y2 - y1
+        if (not self.eligible(c) or det["colour"] in self.a.plain_colours or h < self.a.vlm_min_px
+                or c.asks >= self.a.vlm_asks):
+            return
+        if not det["method"].startswith("centroid"):
+            return          # no depth on the box: often a YOLO hit on nothing, and SmolVLM names a shape anyway
+        if c.asked_h and h < self.a.vlm_regrow * c.asked_h:
+            return
+        crop = shape_crop(img, det["box"])
+        if crop is None:
+            return
+        with self.cv:
+            old = self.pending.get(c.id)
+            if old is None or h > old[2]:
+                self.pending[c.id] = (c, crop, h, det["dist"])
+                self.cv.notify_all()
+
+    def idle(self):
+        with self.cv:
+            return not self.pending and self.busy is None
+
+    def wait(self, timeout):
+        """Wait until nothing is queued or being asked.  → True if idle."""
+        t_end = time.time() + timeout
+        with self.cv:
+            while self.pending or self.busy is not None:
+                left = t_end - time.time()
+                if left <= 0:
+                    return False
+                self.cv.wait(left)
+        return True
+
+    def _work(self):
+        while True:
+            with self.cv:
+                while not self.pending:
+                    self.cv.wait()
+                cid = max(self.pending, key=lambda k: self.pending[k][2])     # biggest view first
+                c, crop, h, dist = self.pending.pop(cid)
+                self.busy = cid
+            try:
+                if c.passed or c.asks >= self.a.vlm_asks or (c.asked_h and h < self.a.vlm_regrow * c.asked_h):
+                    continue
+                t0 = time.time()
+                ans = vlm_shape(self.a.vlm, crop, self.a.vlm_timeout)
+                shape, w = parse_shape(ans)
+                self.n += 1
+                fn = f"vlm_{self.n:03d}_cup{c.id}_{shape or 'none'}.jpg"
+                cv2.imwrite(os.path.join(self.run_dir, fn), crop)
+                before = c.shape
+                c.vote_shape(shape, w * h, ans, h)
+                log(f"  VLM cup#{c.id} ({c.colour}, box {h:.0f} px, {dist:.2f} m): '{ans}' → {shape or 'no shape'} "
+                    f"({time.time() - t0:.1f} s) votes {c.shape_votes_str()} → class {c.label}"
+                    + (" (changed)" if before and before != c.shape else "") + f" [{fn}]")
+            except Exception as e:   # noqa: BLE001
+                log(f"  VLM error on cup#{c.id}: {e}")
+            finally:
+                with self.cv:
+                    self.busy = None
+                    self.cv.notify_all()
+
+
 # ── map objects ──────────────────────────────────────────────────────────────
 class Cup:
     _n = 0
@@ -127,6 +264,34 @@ class Cup:
         self.votes, self.kinds = {}, {kind: 0.0}
         self.passed = self.failed = False
         self.side = None; self.travel = None; self.pass_pose = None; self.frame = None; self.seq = None
+        self.shapes, self.answers, self.asks, self.asked_h = {}, [], 0, 0.0
+        self.n = 0                            # detections merged into this cup
+        self.plain = {"red", "blue"}          # set by main from --plain-colours
+
+    @property
+    def shape(self):
+        """'triangle' / 'circle' once the VLM's votes say so (shape cups only), else None."""
+        if self.colour in self.plain or not self.shapes:
+            return None
+        s = max(self.shapes, key=self.shapes.get)
+        return s if self.shapes[s] > 0 else None
+
+    @property
+    def label(self):
+        """The cup's class: its shape (shape cups), else its colour."""
+        return self.shape or self.colour
+
+    def vote_shape(self, shape, w, ans, h):
+        self.asks += 1; self.asked_h = max(self.asked_h, h); self.answers = self.answers + [ans]
+        if shape:
+            # a new dict, not in place: the main thread reads it while the VLM thread votes
+            self.shapes = {**self.shapes, shape: self.shapes.get(shape, 0.0) + w}
+
+    def shape_votes_str(self):
+        return ", ".join(f"{k} {v:.0f}" for k, v in self.shapes.items()) or "none"
+
+    def is_(self, name):
+        return name in (self.colour, self.shape)
 
     @property
     def kind(self):
@@ -134,7 +299,15 @@ class Cup:
 
     @property
     def colour(self):
-        return max(self.votes, key=self.votes.get) if self.votes else "?"
+        """Most-voted colour — but a hue the cup clearly showed (≥ 25 % of the votes) beats the
+        unsaturated readings: close up a blue cup's shaded side is too dark (V < 45) to have a
+        hue and reads grey, and close views weigh most."""
+        if not self.votes:
+            return "?"
+        hued = {k: v for k, v in self.votes.items() if k not in UNSATURATED}
+        if hued and max(hued.values()) >= 0.25 * sum(self.votes.values()):
+            return max(hued, key=hued.get)
+        return max(self.votes, key=self.votes.get)
 
     def add(self, pos, colour, kind, dist):
         w = 1.0 / max(0.4, dist)
@@ -148,10 +321,12 @@ class Cup:
 
     def __repr__(self):
         st = "passed" if self.passed else "unreachable" if self.failed else "seen"
-        return f"cup#{self.id} {self.colour} {self.kind} @({self.pos[0]:+.2f},{self.pos[1]:+.2f}) {st}"
+        sh = f" [{self.shape}]" if self.shape else ""
+        return f"cup#{self.id} {self.colour}{sh} {self.kind} @({self.pos[0]:+.2f},{self.pos[1]:+.2f}) {st}"
 
     def to_json(self):
-        return {"id": self.id, "colour": self.colour, "kind": self.kind, "pos": [round(v, 3) for v in self.pos],
+        return {"id": self.id, "colour": self.colour, "kind": self.kind, "class": self.label, "shape": self.shape,
+                "shape_votes": {k: round(v, 1) for k, v in self.shapes.items()}, "vlm_answers": self.answers, "pos": [round(v, 3) for v in self.pos],
                 "votes": {k: round(v, 2) for k, v in self.votes.items()}, "sequence": self.seq,
                 "passed": self.passed, "side": self.side, "travel_deg": None if self.travel is None else
                 round(math.degrees(self.travel), 1), "pass_pose": self.pass_pose, "frame": self.frame}
@@ -323,7 +498,8 @@ def annotate(img, dets, path, title=""):
         col = BGR.get(d["colour"], (255, 255, 255))
         cv2.rectangle(vis, (x1, y1), (x2, y2), col, 2)
         c = d.get("cup")
-        txt = (f"#{c.id} " if c else "") + f"{d['colour']} {d['kind']} {d['score']:.2f} {d['dist']:.2f}m"
+        txt = (f"#{c.id} " if c else "") + f"{d['colour']}" + (f" {c.shape}" if c and c.shape else "") + \
+            f" {d['kind']} {d['score']:.2f} {d['dist']:.2f}m"
         cv2.putText(vis, txt, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
         cv2.putText(vis, txt, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
     if title:
@@ -401,7 +577,7 @@ def draw_map(path, cups, boxes, robot_path, waypoints, start):
     for c in cups:
         cv2.circle(img, px(*c.pos), max(4, int(CUP_RADIUS * S)), BGR.get(c.colour, (0, 0, 0)), -1)
         cv2.circle(img, px(*c.pos), max(4, int(CUP_RADIUS * S)), (0, 0, 0), 1)
-        lab = f"#{c.id} {c.colour}" + (f" ({c.side})" if c.side else "")
+        lab = f"#{c.id} {c.colour}" + (f" {c.shape}" if c.shape else "") + (f" ({c.side})" if c.side else "")
         cv2.putText(img, lab, (px(*c.pos)[0] + 8, px(*c.pos)[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
     cv2.drawMarker(img, px(*start[:2]), (0, 0, 255), cv2.MARKER_STAR, 16, 2)
     cv2.putText(img, "start", (px(*start[:2])[0] + 8, px(*start[:2])[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
@@ -437,10 +613,23 @@ def main():
     ap.add_argument("--resend", type=float, default=0.15, help="m a refined cup must move before its goal is re-sent")
     ap.add_argument("--skip-colours", type=lambda v: set(v.split(",")) if v else set(), default={"grey"},
                     help="comma list: 'cups' of these colours are ignored (YOLO false hits are mostly grey)")
-    ap.add_argument("--stop-colour", default="purple", help="the cup colour that ends a sequence")
+    ap.add_argument("--stop-colour", default="purple",
+                    help="the cup colour — or shape class, triangle / circle — that ends a sequence")
     ap.add_argument("--colours", type=lambda v: set(v.split(",")) if v else set(), default=set(),
-                    help="comma list: only cups of these colours are weaved (the stop colour always counts; "
-                         "empty = all)")
+                    help="comma list: only cups of these colours / shape classes (triangle, circle) are weaved "
+                         "(the stop colour always counts; empty = all)")
+    ap.add_argument("--vlm", default="http://192.168.1.175:8080", help="SmolVLM llama.cpp server ('' = no shapes)")
+    ap.add_argument("--vlm-timeout", type=float, default=30.0)
+    ap.add_argument("--plain-colours", type=lambda v: set(v.split(",")) if v else set(), default={"red", "blue"},
+                    help="comma list: cups of these colours have no drawn shape (not sent to the VLM)")
+    ap.add_argument("--vlm-min-px", type=float, default=24, help="px: box height a cup needs to be asked about")
+    ap.add_argument("--vlm-regrow", type=float, default=1.4,
+                    help="ask again once the cup's box is this many times taller than at the last ask")
+    ap.add_argument("--vlm-asks", type=int, default=4, help="asks per cup at most")
+    ap.add_argument("--shape-min-dets", type=int, default=3,
+                    help="detections a grey shape cup needs before it is a target (false hits are one-offs)")
+    ap.add_argument("--vlm-wait", type=float, default=15.0,
+                    help="s a search (stopped) waits for pending VLM asks before choosing a cup")
     ap.add_argument("--purple-radius", type=float, default=0.5,
                     help="m around a passed stop-colour cup where detections are ignored")
     ap.add_argument("--more-range", type=float, default=3.0,
@@ -468,6 +657,7 @@ def main():
     waypoints = []                    # pass points actually reached, in order
     known_boxes = []
     st = {"look": 0, "seq": 0, "start": None}
+    shapes = ShapeClassifier(a, run_dir) if a.vlm else None
 
     def save_map():
         boxes = node.obstacles(cups)
@@ -495,10 +685,21 @@ def main():
                 f"{b['size'][0]:.2f}×{b['size'][1]:.2f} m, {b['height'] * 100:.0f} cm tall: {relative(b, cups)}")
 
     def wanted(c):
-        return not a.colours or c.colour in a.colours or c.colour == a.stop_colour
+        if c.colour in a.skip_colours and (c.shape is None or c.n < a.shape_min_dets):
+            # grey: a YOLO false hit unless the VLM saw a shape on it AND YOLO keeps finding it
+            # (SmolVLM names a shape even on an empty crop: one 0.34 hit on the floor became a 'circle')
+            return False
+        return not a.colours or any(c.is_(k) for k in a.colours) or c.is_(a.stop_colour)
+
+    def vlm_settle(why):
+        """Stopped: give pending shape asks time to finish before a decision."""
+        if shapes and not shapes.idle():
+            t0 = time.time()
+            done = shapes.wait(a.vlm_wait)
+            log(f"  {why}: waited {time.time() - t0:.1f} s for the VLM" + ("" if done else " (still busy — going on)"))
 
     def in_purple_zone(pos):
-        return any(k.passed and k.colour == a.stop_colour and math.dist(k.pos, pos) <= a.purple_radius for k in cups)
+        return any(k.passed and k.is_(a.stop_colour) and math.dist(k.pos, pos) <= a.purple_radius for k in cups)
 
     def do_look(tag="", still=True, save="always"):
         """Look (stopped, or on the move: odometry is taken at the frame's time)."""
@@ -507,15 +708,19 @@ def main():
         img, dets, timing = node.look()
         st["look"] += 1
         rx, ry, ryaw = node.robot_pose()
-        dets = [d for d in dets if not (d["kind"] == "cup" and d["colour"] in a.skip_colours)]
+        # skipped colours (grey) stay in when the VLM may name a shape on them
+        dets = [d for d in dets if not (d["kind"] == "cup" and d["colour"] in a.skip_colours
+                                        and (shapes is None or d["colour"] in a.plain_colours))]
         for d in dets:
             c = min(cups, key=lambda k: math.dist(k.pos, d["pos"]), default=None)
             if c is None or math.dist(c.pos, d["pos"]) > a.merge:
                 if in_purple_zone(d["pos"]):         # the purple cup we passed, seen again
                     d["cup"] = None; continue
-                c = Cup(d["pos"], d["kind"]); cups.append(c)
+                c = Cup(d["pos"], d["kind"]); c.plain = a.plain_colours; cups.append(c)
             if not c.passed:            # a passed cup's position is final (it's in the map)
-                c.add(d["pos"], d["colour"], d["kind"], d["dist"])
+                c.add(d["pos"], d["colour"], d["kind"], d["dist"]); c.n += 1
+                if shapes and d["kind"] == "cup":
+                    shapes.offer(c, img, d)
             d["cup"] = c
         dets = [d for d in dets if d["cup"] is not None]
         path = None
@@ -527,7 +732,7 @@ def main():
                 f"{math.degrees(ryaw):.0f}°: {len(dets)} cup(s)/glass(es), {timing}" + (f" → {path}" if path else ""))
         for d in dets:
             chk = "" if d["depth_vs_floor"] is None else f", depth vs floor {d['depth_vs_floor'] * 100:.0f} cm"
-            log(f"  {d['kind']} {d['score']:.2f} {d['colour']} ({d['cinfo']}) {d['dist']:.2f} m at "
+            log(f"  {d['kind']} {d['score']:.2f} {d['colour']} ({d['cinfo']}) class {d['cup'].label}: {d['dist']:.2f} m at "
                 f"{d['bearing']:+.0f}° [{d['method']}{chk}] → {d['cup']}")
         report_new_boxes()
         return img, dets
@@ -552,6 +757,7 @@ def main():
         """Stop, turn to each heading (relative to now) and look, until a cup within rng of near shows up."""
         stop()
         _, _, yaw0 = node.robot_pose()
+        vlm_settle(why)
         for ang in angles:
             if candidates(near, rng):
                 break
@@ -559,6 +765,7 @@ def main():
             log(f"{why}: turning to {math.degrees(ang):+.0f}°")
             node.turn(wrap(yaw0 + ang - yaw))
             do_look(f"{why} {math.degrees(ang):+.0f}°")
+            vlm_settle(why)
         c = candidates(near, rng, heading)
         return c[0] if c else None
 
@@ -622,7 +829,7 @@ def main():
                     c.pos[1] + a.pass_offset * ny + a.pass_beyond * math.sin(travel), travel)
 
         px_, py_, travel = target()
-        log(f"→ passing cup#{c.id} ({c.colour}) on its {side}: via ({px_:+.2f},{py_:+.2f}), "
+        log(f"→ passing cup#{c.id} ({c.label}) on its {side}: via ({px_:+.2f},{py_:+.2f}), "
             f"heading {math.degrees(travel):.0f}°, {math.dist(origin, c.pos):.2f} m away")
         t0 = time.time()
         ok, left = drive(target, a.tolerance, f"pass cup#{c.id}", carrot=a.carrot)
@@ -639,11 +846,11 @@ def main():
         c.passed, c.side, c.travel, c.seq = True, side, travel, st["seq"]
         c.pass_pose = {"x": round(rx, 3), "y": round(ry, 3), "yaw_deg": round(math.degrees(ryaw), 1), "t": time.time()}
         img, _ = do_look(f"passed cup#{c.id}", still=False)
-        fpath = os.path.join(run_dir, f"pass_{sum(k.passed for k in cups):02d}_cup{c.id}_{c.colour}.jpg")
+        fpath = os.path.join(run_dir, f"pass_{sum(k.passed for k in cups):02d}_cup{c.id}_{c.label}.jpg")
         cv2.imwrite(fpath, img)
         c.frame = os.path.basename(fpath)
         waypoints.append((round(rx, 3), round(ry, 3)))
-        log(f"✓ passed cup#{c.id} ({c.colour} {c.kind}) on its {side} in {time.time() - t0:.1f} s: cup at "
+        log(f"✓ passed cup#{c.id} ({c.label} {c.kind}) on its {side} in {time.time() - t0:.1f} s: cup at "
             f"({c.pos[0]:+.2f},{c.pos[1]:+.2f}), robot ({rx:+.2f},{ry:+.2f}), {math.dist((rx, ry), c.pos):.2f} m "
             f"from it ({left:.2f} m from the pass point) → {c.frame}")
         save_map()
@@ -671,6 +878,7 @@ def main():
         log(f"start ({sx:+.2f},{sy:+.2f}) facing {math.degrees(syaw):.0f}° → output {run_dir}")
         t_run = time.time()
         do_look("start")
+        vlm_settle("first look")
         first = candidates((sx, sy), a.first_range)
         if a.dry_run:
             save_map()
@@ -692,9 +900,9 @@ def main():
                 passed = pass_cup(c, side)
                 side = "right" if side == "left" else "left"     # the weave pattern holds even past a skipped cup
                 if passed:
-                    if c.colour == a.stop_colour:
+                    if c.is_(a.stop_colour):
                         last = c
-                        log(f"=== sequence {st['seq']} ends at {a.stop_colour} cup#{c.id} — ignoring {a.purple_radius} m "
+                        log(f"=== sequence {st['seq']} ends at {a.stop_colour} cup#{c.id} ({c.label}) — ignoring {a.purple_radius} m "
                             f"around it from now on")
                         purple = True
                         break

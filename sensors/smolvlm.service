@@ -1,0 +1,25 @@
+# SmolVLM-500M (llama.cpp) for jetson/cup_weave.py (cup shapes) and jetson/can_hunt.py (brands).
+# Install: sudo cp sensors/smolvlm.service /etc/systemd/system/ && sudo systemctl daemon-reload \
+#          && sudo systemctl restart smolvlm
+# Every request is a one-off question about a new crop, so the server keeps no
+# context: --cache-ram 0 turns off the RAM prompt cache (default 8 GiB, grew
+# ~25 MB per new image) and -np 1 keeps a single slot.  Clients also send
+# "cache_prompt": false.
+[Unit]
+Description=SmolVLM-500M vision-language model (llama.cpp server, port 8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ghost
+WorkingDirectory=/home/ghost/llama.cpp
+ExecStart=/home/ghost/llama.cpp/build/bin/llama-server \
+  -m /home/ghost/ghost/models/vlm/SmolVLM-500M-Instruct-Q8_0.gguf \
+  --mmproj /home/ghost/ghost/models/vlm/mmproj-SmolVLM-500M-Instruct-Q8_0.gguf \
+  --host 0.0.0.0 --port 8080 -t 4 -c 4096 -np 1 --cache-ram 0 --alias smolvlm-500m
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
