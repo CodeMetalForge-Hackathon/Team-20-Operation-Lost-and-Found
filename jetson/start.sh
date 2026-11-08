@@ -8,6 +8,7 @@
 #   NO_BRIDGE=1 bash jetson/start.sh            Nav2 up but GHOST not driving (manual goals)
 #   CELL_M=0.5 ORIGIN=0.5,0.5 bash jetson/start.sh   indoor grid, launch 0.5 m in from the corner
 #   CAM_X=0.12 CAM_Z=0.10 bash jetson/start.sh  camera mount offset from robot centre (m)
+#                                               default: measured mount, 6.35 cm ahead, 14.2875 cm up
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
 #
 # Logs: jetson/logs/*.log      Stop: Ctrl-C (wheels are stopped on exit)
@@ -55,7 +56,7 @@ GHOST_ADDR="$GHOST_ADDR" start core "$CORE_BIN"
 # ── robot: camera + cuVSLAM (+ Nav2) ──────────────────────────────────────────
 NAV2=true; [ -n "${NO_NAV2:-}" ] && NAV2=false
 start robot ros2 launch "$J/launch/robot.launch.py" nav2:="$NAV2" \
-  color:="${COLOR:-false}" cam_x:="${CAM_X:-0.0}" cam_z:="${CAM_Z:-0.0}"
+  color:="${COLOR:-false}" cam_x:="${CAM_X:-0.0635}" cam_z:="${CAM_Z:-0.142875}"
 
 # ── wheels ────────────────────────────────────────────────────────────────────
 HW=(--hardware); [ -n "${DRY_RUN:-}" ] && HW=()
