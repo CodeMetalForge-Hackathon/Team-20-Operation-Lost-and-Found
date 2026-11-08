@@ -26,6 +26,12 @@
 #                                               default: this robot, from base_driver.py --identify
 #   FILTER_ARGS="--close 0.6" bash jetson/start.sh  obstacle_filter.py options (--help)
 #   DASH_PORT=8000 bash jetson/start.sh          dashboard served at http://<jetson-ip>:8000/
+#   THERMAL=true bash jetson/start.sh            USB thermal camera (jetson/thermal_cam.py, default off):
+#                                               /thermal/* topics, and its frames go to the Pi's YOLO
+#                                               person detector instead of the depth camera's
+#   THERMAL=true THERMAL_YOLO=false ...          thermal topics only, YOLO keeps the depth camera
+#   THERMAL_ROTATE=0 THERMAL_DEVICE=auto         clockwise rotation (0 = as mounted) / device
+#   THERMAL_ARGS="--source temp" ...             more thermal_cam.py options (--help)
 #
 # Site settings: jetson/config/stack.env (optional, gitignored) holds VAR=value
 # lines for any of the above, e.g. COLOR=true — the way to set them for the
@@ -172,9 +178,16 @@ fi
 # shellcheck disable=SC2086
 start base python3 "$J/base_driver.py" "${HW[@]}" --nav "${STAMP_ARGS[@]}" ${DRIVE_ARGS}
 
+# ── thermal camera (off unless THERMAL=true; waits for the camera, never exits) ─
+if [ "${THERMAL:-false}" = "true" ]; then
+  # shellcheck disable=SC2086
+  start thermal python3 "$J/thermal_cam.py" ${THERMAL_ARGS:-}
+fi
+
 # ── camera frames → Pi detector ──────────────────────────────────────────────
 FRAME_TOPIC=/camera/left_ir/image_raw/compressed
 [ "${COLOR:-false}" = "true" ] && FRAME_TOPIC=/camera/color/image_raw/compressed
+[ "${THERMAL:-false}" = "true" ] && [ "${THERMAL_YOLO:-true}" = "true" ] && FRAME_TOPIC=/thermal/image_raw/compressed
 start frames python3 "$J/frame_server.py" --topic "$FRAME_TOPIC"
 
 # ── dashboard for PCs on the network: http://<jetson-ip>:8000/ ───────────────
