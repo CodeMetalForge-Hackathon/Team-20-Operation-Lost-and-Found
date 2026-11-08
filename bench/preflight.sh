@@ -7,10 +7,12 @@ set -uo pipefail
 GHOST_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOGS="$GHOST_DIR/jetson/logs"
 ROS_DISTRO="${ROS_DISTRO:-$(ls /opt/ros 2>/dev/null | head -1)}"
+set +u   # ROS setup files read unset variables
 # shellcheck disable=SC1090
 source "/opt/ros/$ROS_DISTRO/setup.bash" 2>/dev/null
 WS="${ISAAC_ROS_WS:-/workspaces/isaac_ros-dev}"
 [ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash"
+set -u
 
 pass() { printf '  \e[32mPASS\e[0m  %s\n' "$*"; }
 warn() { printf '  \e[33mWARN\e[0m  %s\n' "$*"; }

@@ -24,10 +24,12 @@ ORIGIN="${ORIGIN:-0,0}"
 if [ -z "${ROS_DISTRO:-}" ]; then
   ROS_DISTRO="$(ls /opt/ros 2>/dev/null | head -1)"
 fi
+set +u   # ROS setup files read unset variables
 # shellcheck disable=SC1090
 source "/opt/ros/${ROS_DISTRO}/setup.bash" || { echo "no ROS 2 at /opt/ros/$ROS_DISTRO"; exit 1; }
 WS="${ISAAC_ROS_WS:-/workspaces/isaac_ros-dev}"
 [ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash"
+set -u
 STAMP_ARGS=(); [ "$ROS_DISTRO" = "humble" ] && STAMP_ARGS=(--unstamped)
 echo "[ghost] ROS 2 $ROS_DISTRO  workspace ${WS}"
 

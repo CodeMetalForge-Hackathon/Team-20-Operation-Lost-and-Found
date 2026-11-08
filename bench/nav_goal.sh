@@ -8,7 +8,9 @@
 set -euo pipefail
 X="${1:?x metres}"; Y="${2:-0}"
 ROS_DISTRO="${ROS_DISTRO:-$(ls /opt/ros | head -1)}"
+set +u   # ROS setup files read unset variables
 # shellcheck disable=SC1090
 source "/opt/ros/$ROS_DISTRO/setup.bash"
+set -u
 ros2 action send_goal --feedback /navigate_to_pose nav2_msgs/action/NavigateToPose \
   "{pose: {header: {frame_id: odom}, pose: {position: {x: $X, y: $Y, z: 0.0}, orientation: {w: 1.0}}}}"
