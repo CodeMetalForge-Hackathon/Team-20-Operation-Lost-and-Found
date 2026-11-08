@@ -9,9 +9,18 @@
 #   CELL_M=0.5 ORIGIN=0.5,0.5 bash jetson/start.sh   indoor grid, launch 0.5 m in from the corner
 #   CAM_X=0.12 CAM_Z=0.10 bash jetson/start.sh  camera mount offset from robot centre (m)
 #                                               default: measured mount, 6.35 cm ahead, 14.2875 cm up
-#   CAM_PITCH=-1.2 bash jetson/start.sh          camera pitch, deg, ROS sign (+ = nose down)
-#                                               default: -1.2 (1.2° nose-UP), measured from the floor
-#                                               plane in the depth cloud, 2026-11-08
+#   CALIBRATE=0 bash jetson/start.sh            skip the start-up mount calibration (below)
+#   CAM_PITCH=-1.2 CAM_ROLL=0 CAM_YAW=-4.4 bash jetson/start.sh
+#                                               camera mount angles, deg, ROS sign (pitch + = nose
+#                                               down, roll + = right side down, yaw + = turned left);
+#                                               set here they win over the calibration for this run
+#
+# Start-up calibration (every boot unless CALIBRATE=0): camera + cuVSLAM + wheels
+# come up alone, jetson/calibrate_mount.py fits the floor (pitch, roll, floor
+# height — standing still) and then DRIVES ~20 cm straight forward and back for
+# the yaw (skipped if something is in the way ahead, or with DRY_RUN); the
+# results go to jetson/config/mount_calibration.env and the full stack starts
+# with them.  Values failing their checks keep the previous ones.  Adds ~40 s.
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
 #                                               default: this robot, from base_driver.py --identify
 #   FILTER_ARGS="--close 0.6" bash jetson/start.sh  obstacle_filter.py options (--help)
@@ -80,6 +89,55 @@ start() {   # start NAME CMD…  → background, logged
   PIDS+=($!)
 }
 
+# ── camera mount: saved calibration < fresh calibration < explicit env ──────
+CAL_FILE="$J/config/mount_calibration.env"
+declare -A EXPLICIT=()
+for v in CAM_PITCH CAM_ROLL CAM_YAW FLOOR_Z; do [ -n "${!v:-}" ] && EXPLICIT[$v]="${!v}"; done
+load_mount() {   # saved file, then explicit env on top, then built-in defaults
+  # shellcheck disable=SC1090
+  [ -f "$CAL_FILE" ] && source "$CAL_FILE"
+  local v; for v in "${!EXPLICIT[@]}"; do printf -v "$v" '%s' "${EXPLICIT[$v]}"; done
+  CAM_PITCH="${CAM_PITCH:--1.2}"; CAM_ROLL="${CAM_ROLL:-0.0}"
+  CAM_YAW="${CAM_YAW:--4.4}"; FLOOR_Z="${FLOOR_Z:--0.004}"
+}
+load_mount
+robot_args() {   # robot.launch.py arguments for the current mount
+  echo color:="${COLOR:-false}" cam_x:="${CAM_X:-0.0635}" cam_z:="${CAM_Z:-0.142875}" \
+    cam_pitch_deg:="$CAM_PITCH" cam_roll_deg:="$CAM_ROLL" cam_yaw_deg:="$CAM_YAW"
+}
+
+HW=(--hardware); [ -n "${DRY_RUN:-}" ] && HW=()
+# wheel wiring found on the bench with base_driver.py --identify (motor ids in
+# fl, fr, rl, rr order, and direction signs); override with DRIVE_ARGS=...
+DRIVE_ARGS="${DRIVE_ARGS:-"--ids 1,3,2,4 --signs=1,-1,1,-1"}"
+
+if [ "${CALIBRATE:-1}" != "0" ]; then
+  echo "[ghost] mount calibration (pitch $CAM_PITCH, roll $CAM_ROLL, yaw $CAM_YAW to start) → $LOGS/calibrate.log"
+  # shellcheck disable=SC2046
+  start cal_robot ros2 launch "$J/launch/robot.launch.py" nav2:=false $(robot_args)
+  # shellcheck disable=SC2086
+  start cal_base python3 "$J/base_driver.py" "${HW[@]}" --nav "${STAMP_ARGS[@]}" ${DRIVE_ARGS}
+  CAL_ARGS=(); [ -n "${DRY_RUN:-}" ] && CAL_ARGS=(--no-drive)
+  # a tracked background job + wait, so Ctrl-C / docker stop interrupts it
+  # mid-drive (bash defers traps until a FOREGROUND command finishes)
+  start calibrate timeout 180 python3 "$J/calibrate_mount.py" --out "$CAL_FILE.new" --floor-z "$FLOOR_Z" "${CAL_ARGS[@]}"
+  wait "${PIDS[-1]}"; CAL_RC=$?
+  if [ "$CAL_RC" = 0 ] && [ -s "$CAL_FILE.new" ]; then
+    mv "$CAL_FILE.new" "$CAL_FILE"
+  else
+    rm -f "$CAL_FILE.new"; echo "[ghost] mount calibration FAILED — keeping the saved mount (see calibrate.log)" >&2
+  fi
+  grep -E "floor:|yaw:|result:" "$LOGS/calibrate.log" | sed 's/^/[ghost]   /'
+  # tear the calibration stack down (camera USB must be free for the real one)
+  signal_all INT
+  for _ in $(seq 1 50); do any_alive || break; sleep 0.2; done
+  any_alive && { signal_all TERM; sleep 3; }
+  any_alive && signal_all KILL
+  wait 2>/dev/null; PIDS=(); sleep 2
+  load_mount
+fi
+echo "[ghost] mount: pitch $CAM_PITCH°, roll $CAM_ROLL°, yaw $CAM_YAW°, floor z $FLOOR_Z m"
+
 # ── ghost-core ────────────────────────────────────────────────────────────────
 CORE_BIN="$GHOST_DIR/core/target/release/ghost"
 [ -x "$CORE_BIN" ] || (cd "$GHOST_DIR/core" && cargo build --release) || exit 1
@@ -87,23 +145,18 @@ GHOST_ADDR="$GHOST_ADDR" start core "$CORE_BIN"
 
 # ── robot: camera + cuVSLAM (+ Nav2) ──────────────────────────────────────────
 NAV2=true; [ -n "${NO_NAV2:-}" ] && NAV2=false
-start robot ros2 launch "$J/launch/robot.launch.py" nav2:="$NAV2" \
-  color:="${COLOR:-false}" cam_x:="${CAM_X:-0.0635}" cam_z:="${CAM_Z:-0.142875}" \
-  cam_pitch_deg:="${CAM_PITCH:--1.2}"
+# shellcheck disable=SC2046
+start robot ros2 launch "$J/launch/robot.launch.py" nav2:="$NAV2" $(robot_args)
 
 # ── obstacle filter: floor removed in the robot frame + ego-motion check ─────
 # Feeds Nav2's costmaps and Collision Monitor (see jetson/obstacle_filter.py).
 # Without it the Collision Monitor's source times out and the robot won't move.
 if [ "$NAV2" = "true" ]; then
-  start filter python3 "$J/obstacle_filter.py" ${FILTER_ARGS:-}
+  start filter python3 "$J/obstacle_filter.py" --floor-z "$FLOOR_Z" ${FILTER_ARGS:-}
 fi
 
 # ── wheels ────────────────────────────────────────────────────────────────────
-HW=(--hardware); [ -n "${DRY_RUN:-}" ] && HW=()
 # shellcheck disable=SC2086
-# wheel wiring found on the bench with base_driver.py --identify (motor ids in
-# fl, fr, rl, rr order, and direction signs); override with DRIVE_ARGS=...
-DRIVE_ARGS="${DRIVE_ARGS:-"--ids 1,3,2,4 --signs=1,-1,1,-1"}"
 start base python3 "$J/base_driver.py" "${HW[@]}" --nav "${STAMP_ARGS[@]}" ${DRIVE_ARGS}
 
 # ── camera frames → Pi detector ──────────────────────────────────────────────

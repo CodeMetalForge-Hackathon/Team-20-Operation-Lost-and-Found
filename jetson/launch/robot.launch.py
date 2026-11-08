@@ -7,7 +7,7 @@ GHOST robot bringup (Jetson, inside the Isaac ROS environment).
   ros2 launch jetson/launch/robot.launch.py cam_x:=0.12 cam_z:=0.10   camera mount offset (MEASURE)
   ros2 launch jetson/launch/robot.launch.py cam_pitch_deg:=-1.2        camera mount pitch (MEASURE)
 
-Frames:  odom → base_link (cuVSLAM)  →  camera_link (static mount: cam_x, cam_z, cam_pitch_deg)
+Frames:  odom → base_link (cuVSLAM)  →  camera_link (static mount: cam_x, cam_z, cam_roll/pitch/yaw_deg)
          cuVSLAM tracks base_link, so odom's z = 0 plane is base_link's start
          plane — the floor plane, if the mount pitch is right — and the ground
          constraint keeps the robot on it.
@@ -71,6 +71,11 @@ def generate_launch_description():
                               description="m: camera above base_link"),
         DeclareLaunchArgument("cam_pitch_deg", default_value="0.0",
                               description="deg: camera pitch on the robot, ROS sign (+ = nose DOWN)"),
+        DeclareLaunchArgument("cam_roll_deg", default_value="0.0",
+                              description="deg: camera roll on the robot, ROS sign (+ = right side DOWN)"),
+        DeclareLaunchArgument("cam_yaw_deg", default_value="0.0",
+                              description="deg: camera yaw on the robot, ROS sign (+ = turned LEFT); "
+                                          "measure with jetson/calibrate_yaw.py"),
         DeclareLaunchArgument("nav2_params", default_value=DEFAULT_NAV2_PARAMS),
     ]
 
@@ -116,10 +121,12 @@ def generate_launch_description():
     # Camera mount on the robot: camera_link's pose in base_link (robot centre,
     # level).  base_link is the parent so cuVSLAM can publish odom → base_link.
     cam_pitch_rad = PythonExpression([Cfg("cam_pitch_deg"), " * 3.141592653589793 / 180.0"])
+    cam_roll_rad = PythonExpression([Cfg("cam_roll_deg"), " * 3.141592653589793 / 180.0"])
+    cam_yaw_rad = PythonExpression([Cfg("cam_yaw_deg"), " * 3.141592653589793 / 180.0"])
     base_tf = Node(package="tf2_ros", executable="static_transform_publisher",
                    name="tf_base_to_camera",
                    arguments=["--x", Cfg("cam_x"), "--y", "0", "--z", Cfg("cam_z"),
-                              "--roll", "0", "--pitch", cam_pitch_rad, "--yaw", "0",
+                              "--roll", cam_roll_rad, "--pitch", cam_pitch_rad, "--yaw", cam_yaw_rad,
                               "--frame-id", "base_link", "--child-frame-id", "camera_link"])
 
     nav2_nodes = [Node(package=pkg, executable=exe, name=exe, output="screen",
