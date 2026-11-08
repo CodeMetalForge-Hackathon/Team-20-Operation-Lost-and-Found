@@ -22,6 +22,10 @@ That last point is the core display rule: **holo vs. solid** (section 3).
 
 ---
 
+![C2 operations picture v0.1](opPic1.png)
+*C2 operations picture, v0.1: first end-to-end build.*
+
+
 ## 2. Where information flows
 
 The operations picture sits in the middle. It is both the source of the plan and the destination of the results.
@@ -103,6 +107,9 @@ The Bayesian search is not a separate box the board looks at. It runs **on the o
 > **Initial implementation:** the GHOST core (Rust) already implements the belief grid, likelihood-ratio updates, and an information-gain planner. The operations picture adopts it as the engine and adds what the denied concept requires: coverage-based detection, terrain-driven motion between returns, and holo/solid knowledge on everything it outputs.
 
 ---
+
+![C2 operations picture v0.2](opPicv2.png)
+*C2 operations picture, v0.2: terrain textures, enemy AO, stronger heat map, redesigned dashboard.*
 
 ## 5. The board: terrain and scale
 
