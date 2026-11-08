@@ -49,8 +49,9 @@ logged — when first seen and in the summary — relative to their nearest cup,
 that cup's travel frame (ahead/behind, left/right), and whether they lie
 between two consecutive cups; everything else is only in map.json.
 
-Shape cups: cups that are NOT red or blue (--plain-colours) carry a drawn
-triangle or circle.  YOLO's box of such a cup is cropped tight (10 % margin)
+Shape cups (OFF by default — pass --vlm http://192.168.1.175:8080 to enable;
+without it grey/white cups are ignored and SmolVLM is never called): cups that
+are NOT red or blue (--plain-colours) carry a drawn triangle or circle.  YOLO's box of such a cup is cropped tight (10 % margin)
 from the full colour frame and SmolVLM on the Pi (--vlm, llama.cpp) is asked
 "What shape is drawn on the cup?"; the answer maps to triangle (triangle) or
 circle (circle/O/oval/round; square/rectangle count half — that is how SmolVLM
@@ -76,7 +77,6 @@ import os
 import threading
 import time
 import urllib.request
-import queue
 from collections import deque
 
 import cv2
@@ -133,6 +133,10 @@ def detect_remote(url, img, tile, timeout):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         res = json.load(r)
     return res["dets"], res["ms"], (time.time() - t0) * 1000
+
+
+class PiLost(Exception):
+    """The Pi's detector stopped answering: the weave is over, the robot goes home on odometry."""
 
 
 # ── shape classification (SmolVLM on the Pi) ─────────────────────────────────
@@ -549,7 +553,7 @@ def relative(box, cups):
     return rel
 
 
-def draw_map(path, cups, boxes, robot_path, waypoints, start):
+def draw_map(path, cups, boxes, robot_path, waypoints, start, unconfirmed=frozenset()):
     pts = [start[:2]] + [c.pos for c in cups] + [p[1:] for p in robot_path] + \
           [b["min"] for b in boxes] + [b["max"] for b in boxes]
     lo = np.min(pts, 0) - 0.5; hi = np.max(pts, 0) + 0.5
@@ -575,8 +579,21 @@ def draw_map(path, cups, boxes, robot_path, waypoints, start):
     for w in waypoints:
         cv2.drawMarker(img, px(*w), (0, 0, 0), cv2.MARKER_TILTED_CROSS, 10, 2)
     for c in cups:
-        cv2.circle(img, px(*c.pos), max(4, int(CUP_RADIUS * S)), BGR.get(c.colour, (0, 0, 0)), -1)
-        cv2.circle(img, px(*c.pos), max(4, int(CUP_RADIUS * S)), (0, 0, 0), 1)
+        r = max(4, int(CUP_RADIUS * S))
+        if c.id in unconfirmed:                        # probably a YOLO false hit: faint, "?"
+            cv2.circle(img, px(*c.pos), r, (190, 190, 190), 1)
+            cv2.putText(img, f"#{c.id}?", (px(*c.pos)[0] + 8, px(*c.pos)[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (170, 170, 170), 1)
+            continue
+        cv2.circle(img, px(*c.pos), r, BGR.get(c.colour, (0, 0, 0)), -1)
+        cv2.circle(img, px(*c.pos), r, (0, 0, 0), 1)
+        if c.shape:                                    # shape cups: mapped, not weaved — draw the shape
+            q = px(*c.pos); k = r + 6
+            if c.shape == "triangle":
+                cv2.polylines(img, [np.array([(q[0], q[1] - k), (q[0] - k, q[1] + k - 2), (q[0] + k, q[1] + k - 2)])],
+                              True, (0, 0, 0), 2)
+            else:
+                cv2.circle(img, q, k, (0, 0, 0), 2)
         lab = f"#{c.id} {c.colour}" + (f" {c.shape}" if c.shape else "") + (f" ({c.side})" if c.side else "")
         cv2.putText(img, lab, (px(*c.pos)[0] + 8, px(*c.pos)[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
     cv2.drawMarker(img, px(*start[:2]), (0, 0, 255), cv2.MARKER_STAR, 16, 2)
@@ -613,12 +630,13 @@ def main():
     ap.add_argument("--resend", type=float, default=0.15, help="m a refined cup must move before its goal is re-sent")
     ap.add_argument("--skip-colours", type=lambda v: set(v.split(",")) if v else set(), default={"grey"},
                     help="comma list: 'cups' of these colours are ignored (YOLO false hits are mostly grey)")
-    ap.add_argument("--stop-colour", default="purple",
-                    help="the cup colour — or shape class, triangle / circle — that ends a sequence")
-    ap.add_argument("--colours", type=lambda v: set(v.split(",")) if v else set(), default=set(),
-                    help="comma list: only cups of these colours / shape classes (triangle, circle) are weaved "
-                         "(the stop colour always counts; empty = all)")
-    ap.add_argument("--vlm", default="http://192.168.1.175:8080", help="SmolVLM llama.cpp server ('' = no shapes)")
+    ap.add_argument("--stop-colour", default="",
+                    help="a cup colour that ends a sequence (default none: the weave ends when no next cup is found)")
+    ap.add_argument("--colours", type=lambda v: set(v.split(",")) if v else set(), default={"red", "blue"},
+                    help="comma list: the cup colours that are weaved (plus --stop-colour).  Every other cup — "
+                         "the triangle / circle shape cups — is only classified and mapped, never a target")
+    ap.add_argument("--vlm", default="",
+                    help="SmolVLM llama.cpp server for shape cups, e.g. http://192.168.1.175:8080 (default '' = off)")
     ap.add_argument("--vlm-timeout", type=float, default=30.0)
     ap.add_argument("--plain-colours", type=lambda v: set(v.split(",")) if v else set(), default={"red", "blue"},
                     help="comma list: cups of these colours have no drawn shape (not sent to the VLM)")
@@ -627,7 +645,11 @@ def main():
                     help="ask again once the cup's box is this many times taller than at the last ask")
     ap.add_argument("--vlm-asks", type=int, default=4, help="asks per cup at most")
     ap.add_argument("--shape-min-dets", type=int, default=3,
-                    help="detections a grey shape cup needs before it is a target (false hits are one-offs)")
+                    help="detections a grey shape cup needs to count as found (false hits are one-offs); "
+                         "fewer → marked unconfirmed in the map")
+    ap.add_argument("--pi-fails", type=int, default=2,
+                    help="detector calls failing in a row (each up to --detector-timeout) that mean the Pi is gone: "
+                         "the weave stops and the robot drives home")
     ap.add_argument("--vlm-wait", type=float, default=15.0,
                     help="s a search (stopped) waits for pending VLM asks before choosing a cup")
     ap.add_argument("--purple-radius", type=float, default=0.5,
@@ -656,7 +678,7 @@ def main():
     cups: list[Cup] = []
     waypoints = []                    # pass points actually reached, in order
     known_boxes = []
-    st = {"look": 0, "seq": 0, "start": None}
+    st = {"look": 0, "seq": 0, "start": None, "pi_fails": 0, "pi_lost": False}
     shapes = ShapeClassifier(a, run_dir) if a.vlm else None
 
     def save_map():
@@ -666,10 +688,12 @@ def main():
             b["weave_dist"] = round(weave_distance(b, cups), 3)
             b["near_weave"] = b["kind"] == "box" and b["weave_dist"] <= a.box_near
         with open(os.path.join(run_dir, "map.json"), "w") as fh:
-            json.dump({"start": st["start"], "cups": [c.to_json() for c in cups], "waypoints": waypoints,
+            json.dump({"start": st["start"], "cups": [{**c.to_json(), "detections": c.n, "role": role(c)} for c in cups],
+                       "waypoints": waypoints, "pi_lost": st["pi_lost"],
                        "boxes": boxes, "path": node.path}, fh, indent=1)
         try:
-            draw_map(os.path.join(run_dir, "map.png"), cups, boxes, node.path, waypoints, st["start"])
+            draw_map(os.path.join(run_dir, "map.png"), cups, boxes, node.path, waypoints, st["start"],
+                     {c.id for c in cups if not confirmed(c)})
         except Exception as e:   # noqa: BLE001
             log(f"map drawing failed: {e}")
         return boxes
@@ -685,11 +709,15 @@ def main():
                 f"{b['size'][0]:.2f}×{b['size'][1]:.2f} m, {b['height'] * 100:.0f} cm tall: {relative(b, cups)}")
 
     def wanted(c):
-        if c.colour in a.skip_colours and (c.shape is None or c.n < a.shape_min_dets):
-            # grey: a YOLO false hit unless the VLM saw a shape on it AND YOLO keeps finding it
-            # (SmolVLM names a shape even on an empty crop: one 0.34 hit on the floor became a 'circle')
-            return False
-        return not a.colours or any(c.is_(k) for k in a.colours) or c.is_(a.stop_colour)
+        """Weave targets: cups of --colours (red, blue) and the stop colour.  Shape cups are mapped only."""
+        return c.colour in a.colours or (bool(a.stop_colour) and c.is_(a.stop_colour))
+
+    def role(c):
+        return "weave" if wanted(c) else "mapped" if confirmed(c) else "unconfirmed"
+
+    def confirmed(c):
+        """A shape cup counts as found once YOLO has seen it --shape-min-dets times (false hits are one-offs)."""
+        return c.colour not in a.skip_colours or (c.shape is not None and c.n >= a.shape_min_dets)
 
     def vlm_settle(why):
         """Stopped: give pending shape asks time to finish before a decision."""
@@ -705,7 +733,17 @@ def main():
         """Look (stopped, or on the move: odometry is taken at the frame's time)."""
         if still:
             node.wait_still(settle=0.4)
-        img, dets, timing = node.look()
+        while True:
+            try:
+                img, dets, timing = node.look()
+                st["pi_fails"] = 0
+                break
+            except (OSError, ValueError) as e:        # URLError / timeout / refused / bad JSON
+                st["pi_fails"] += 1
+                log(f"  detector on the Pi failed ({st['pi_fails']}/{a.pi_fails}): {e!r}")
+                if st["pi_fails"] >= a.pi_fails:
+                    raise PiLost(repr(e)) from e
+                time.sleep(0.5)
         st["look"] += 1
         rx, ry, ryaw = node.robot_pose()
         # skipped colours (grey) stay in when the VLM may name a shape on them
@@ -757,7 +795,6 @@ def main():
         """Stop, turn to each heading (relative to now) and look, until a cup within rng of near shows up."""
         stop()
         _, _, yaw0 = node.robot_pose()
-        vlm_settle(why)
         for ang in angles:
             if candidates(near, rng):
                 break
@@ -765,7 +802,6 @@ def main():
             log(f"{why}: turning to {math.degrees(ang):+.0f}°")
             node.turn(wrap(yaw0 + ang - yaw))
             do_look(f"{why} {math.degrees(ang):+.0f}°")
-            vlm_settle(why)
         c = candidates(near, rng, heading)
         return c[0] if c else None
 
@@ -805,6 +841,8 @@ def main():
                 last_look = time.time()
                 try:
                     do_look(what, still=False, save="dets")
+                except PiLost:
+                    raise
                 except Exception as e:   # noqa: BLE001
                     log(f"  look on the move failed: {e}")
                 nx, ny, nyaw = target()
@@ -845,21 +883,30 @@ def main():
         _, _, travel = target()
         c.passed, c.side, c.travel, c.seq = True, side, travel, st["seq"]
         c.pass_pose = {"x": round(rx, 3), "y": round(ry, 3), "yaw_deg": round(math.degrees(ryaw), 1), "t": time.time()}
-        img, _ = do_look(f"passed cup#{c.id}", still=False)
-        fpath = os.path.join(run_dir, f"pass_{sum(k.passed for k in cups):02d}_cup{c.id}_{c.label}.jpg")
-        cv2.imwrite(fpath, img)
-        c.frame = os.path.basename(fpath)
+        lost = None
+        try:
+            img, _ = do_look(f"passed cup#{c.id}", still=False)
+            fpath = os.path.join(run_dir, f"pass_{sum(k.passed for k in cups):02d}_cup{c.id}_{c.label}.jpg")
+            cv2.imwrite(fpath, img)
+            c.frame = os.path.basename(fpath)
+        except PiLost as e:
+            lost = e
         waypoints.append((round(rx, 3), round(ry, 3)))
         log(f"✓ passed cup#{c.id} ({c.label} {c.kind}) on its {side} in {time.time() - t0:.1f} s: cup at "
             f"({c.pos[0]:+.2f},{c.pos[1]:+.2f}), robot ({rx:+.2f},{ry:+.2f}), {math.dist((rx, ry), c.pos):.2f} m "
             f"from it ({left:.2f} m from the pass point) → {c.frame}")
         save_map()
+        if lost:
+            raise lost
         return True
 
     try:
         log(f"waiting for colour, depth and TF (detector {a.detector}, floor z {a.floor_z:+.4f})")
-        with urllib.request.urlopen(f"{a.detector.rstrip('/')}/health", timeout=a.detector_timeout) as r:
-            h = json.load(r)
+        try:
+            with urllib.request.urlopen(f"{a.detector.rstrip('/')}/health", timeout=a.detector_timeout) as r:
+                h = json.load(r)
+        except (OSError, ValueError) as e:
+            log(f"detector on the Pi not reachable ({e!r}) — not starting"); return
         log(f"detector: {h.get('backend')} {os.path.basename(h.get('model', ''))}")
         t0 = time.time()
         while True:
@@ -877,52 +924,58 @@ def main():
         st["start"] = (round(sx, 3), round(sy, 3), round(math.degrees(syaw), 1))
         log(f"start ({sx:+.2f},{sy:+.2f}) facing {math.degrees(syaw):.0f}° → output {run_dir}")
         t_run = time.time()
-        do_look("start")
-        vlm_settle("first look")
-        first = candidates((sx, sy), a.first_range)
-        if a.dry_run:
-            save_map()
-            log("dry run — cups: " + ("; ".join(map(str, cups)) or "none"))
-            log(f"first cup would be: {first[0] if first else f'none within {a.first_range} m'}")
-            return
+        try:
+            do_look("start")
+            first = candidates((sx, sy), a.first_range)
+            if a.dry_run:
+                save_map()
+                log("dry run — cups: " + ("; ".join(map(str, cups)) or "none"))
+                log(f"first cup would be: {first[0] if first else f'none within {a.first_range} m'}")
+                return
 
-        side = a.first_side
-        AROUND = [math.radians(v) for v in (60, 120, 180, 240, 300)]
-        NEAR = [math.radians(v) for v in (45, 90, -45, -90)]
-        BACK = [math.radians(v) for v in (135, 180, -135)]
-        rx, ry, _ = node.robot_pose()
-        c = first[0] if first else search(AROUND, (rx, ry), a.first_range, "looking for a first cup")
-        while c is not None and sum(k.passed for k in cups) < a.max_cups:
-            st["seq"] += 1
-            log(f"=== sequence {st['seq']}: starts at {c}")
-            last, purple = None, False
-            while c is not None:                     # one sequence: only a purple cup ends it
-                passed = pass_cup(c, side)
-                side = "right" if side == "left" else "left"     # the weave pattern holds even past a skipped cup
-                if passed:
-                    if c.is_(a.stop_colour):
-                        last = c
-                        log(f"=== sequence {st['seq']} ends at {a.stop_colour} cup#{c.id} ({c.label}) — ignoring {a.purple_radius} m "
-                            f"around it from now on")
-                        purple = True
-                        break
-                last = c       # passed or skipped: the chain goes on from this cup's position
-                ref = last.pos
-                travel = last.travel if last.travel is not None else node.robot_pose()[2]
-                nxt = candidates(ref, a.next_range, travel)
-                if nxt:                              # known already: straight on, no stop
-                    c = nxt[0]; continue
-                c = search(NEAR + BACK, ref, a.next_range, f"next cup within {a.next_range} m", travel)
-                if c is None:
-                    log(f"=== no {a.stop_colour} cup, and nothing within {a.next_range} m all around — finishing")
-            if not purple:
-                break
-            # after a purple cup: any cup not found yet, within --more-range of here?
+            side = a.first_side
+            AROUND = [math.radians(v) for v in (60, 120, 180, 240, 300)]
+            NEAR = [math.radians(v) for v in (45, 90, -45, -90)]
+            BACK = [math.radians(v) for v in (135, 180, -135)]
             rx, ry, _ = node.robot_pose()
-            nxt = candidates((rx, ry), a.more_range)
-            c = nxt[0] if nxt else search(AROUND, (rx, ry), a.more_range, f"looking for more cups within {a.more_range} m")
-            if c is None:
-                log("no more cups")
+            c = first[0] if first else search(AROUND, (rx, ry), a.first_range, "looking for a first cup")
+            while c is not None and sum(k.passed for k in cups) < a.max_cups:
+                st["seq"] += 1
+                log(f"=== sequence {st['seq']}: starts at {c}")
+                last, purple = None, False
+                while c is not None:                     # one sequence: only a purple cup ends it
+                    passed = pass_cup(c, side)
+                    side = "right" if side == "left" else "left"     # the weave pattern holds even past a skipped cup
+                    if passed:
+                        if c.is_(a.stop_colour):
+                            last = c
+                            log(f"=== sequence {st['seq']} ends at {a.stop_colour} cup#{c.id} ({c.label}) — ignoring {a.purple_radius} m "
+                                f"around it from now on")
+                            purple = True
+                            break
+                    last = c       # passed or skipped: the chain goes on from this cup's position
+                    ref = last.pos
+                    travel = last.travel if last.travel is not None else node.robot_pose()[2]
+                    nxt = candidates(ref, a.next_range, travel)
+                    if nxt:                              # known already: straight on, no stop
+                        c = nxt[0]; continue
+                    c = search(NEAR + BACK, ref, a.next_range, f"next cup within {a.next_range} m", travel)
+                    if c is None:
+                        log(f"=== no {a.stop_colour} cup, and nothing within {a.next_range} m all around — finishing")
+                if not purple:
+                    break
+                # after a purple cup: any cup not found yet, within --more-range of here?
+                rx, ry, _ = node.robot_pose()
+                nxt = candidates((rx, ry), a.more_range)
+                c = nxt[0] if nxt else search(AROUND, (rx, ry), a.more_range, f"looking for more cups within {a.more_range} m")
+                if c is None:
+                    log("no more cups")
+        except PiLost as e:
+            st["pi_lost"] = True
+            log(f"✗ the Pi stopped answering ({e}) — abandoning the weave, returning home on odometry")
+            if a.dry_run:
+                return
+            stop()
 
         # home along the waypoints, newest first — through them, no stops
         route = [w for w in reversed(waypoints[:-1])] + [(sx, sy)]
@@ -952,10 +1005,14 @@ def main():
             pass
         try:
             if st["start"]:
+                if shapes and not st["pi_lost"]:
+                    shapes.wait(a.vlm_wait)          # pending shape answers make it into the map
                 boxes = save_map()
                 log(f"summary — {sum(c.passed for c in cups)} cup(s) passed in {st['seq']} sequence(s):")
                 for c in sorted(cups, key=lambda k: (k.pass_pose or {}).get("t", 1e12)):
-                    log(f"  {c}" + (f", passed on its {c.side} in sequence {c.seq}" if c.passed else ""))
+                    tag = "" if wanted(c) else " — mapped only" if confirmed(c) else \
+                        f" — unconfirmed (seen {c.n}×, likely a false hit)"
+                    log(f"  {c}{tag}" + (f", passed on its {c.side} in sequence {c.seq}" if c.passed else ""))
                 far = [b for b in boxes if not b["near_weave"]]
                 boxes = [b for b in boxes if b["near_weave"]]
                 log(f"boxes within {a.box_near} m of the weave: {len(boxes)}"
