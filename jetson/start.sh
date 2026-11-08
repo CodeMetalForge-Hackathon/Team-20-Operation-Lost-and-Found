@@ -18,6 +18,7 @@ set -uo pipefail
 GHOST_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 J="$GHOST_DIR/jetson"
 LOGS="$J/logs"; mkdir -p "$LOGS"
+rm -f "$LOGS"/*.log   # no stale logs from a previous run (preflight reads them)
 GHOST_ADDR="${GHOST_ADDR:-0.0.0.0:9001}"          # 0.0.0.0 so the Pi can reach the core
 CELL_M="${CELL_M:-2.0}"
 ORIGIN="${ORIGIN:-0,0}"

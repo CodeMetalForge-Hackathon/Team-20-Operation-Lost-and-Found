@@ -38,7 +38,10 @@ echo "camera + odometry"
 check_rate "odometry"     /visual_slam/tracking/odometry 15
 check_rate "depth cloud"  /camera/depth/points 5
 check_rate "IR frames"    /camera/left_ir/image_raw/compressed 5
-if timeout 6 ros2 run tf2_ros tf2_echo odom base_link 2>/dev/null | grep -q Translation; then
+# capture first: under pipefail, `tf2_echo | grep -q` fails even on a match
+# (tf2_echo exits non-zero when grep closes the pipe or timeout kills it)
+TF_OUT="$(timeout 6 ros2 run tf2_ros tf2_echo odom base_link 2>/dev/null)"
+if grep -q Translation <<<"$TF_OUT"; then
   pass "TF odom → base_link"
 else
   fail "no TF odom → base_link (cuVSLAM not tracking, or camera_link→base_link missing)"
