@@ -25,7 +25,12 @@ if [ ! -f "$MODELS/yolov8n.onnx" ]; then
   echo "[models] exporting yolov8n.onnx (one-off, ~1 min)"
   VENV="$(mktemp -d)"
   python3 -m venv "$VENV"
-  "$VENV/bin/pip" install -q ultralytics onnx onnxslim
+  # CPU-only PyTorch: the default PyPI wheel on aarch64 drags in ~8 GB of CUDA
+  # libraries (nvidia-*, triton) that fill a Pi's SD card and are never used.
+  "$VENV/bin/pip" install -q --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    ultralytics onnx onnxslim
   (cd "$MODELS" && "$VENV/bin/python" - <<'EOF'
 from ultralytics import YOLO
 YOLO("yolov8n.pt").export(format="onnx", imgsz=640, opset=12, simplify=True)

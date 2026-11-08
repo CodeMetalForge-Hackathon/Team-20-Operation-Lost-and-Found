@@ -14,10 +14,14 @@ check() { if eval "$2" >/dev/null 2>&1; then log "ok    $1"; else log "MISSING $
 # ── ROS 2 ─────────────────────────────────────────────────────────────────────
 ROS_DISTRO="${ROS_DISTRO:-$(ls /opt/ros 2>/dev/null | head -1)}"
 [ -n "$ROS_DISTRO" ] || { log "no ROS 2 under /opt/ros — run this inside the Isaac ROS container"; exit 1; }
+WS="${ISAAC_ROS_WS:-/workspaces/isaac_ros-dev}"
+# ROS setup files read unset variables (AMENT_TRACE_SETUP_FILES, GZ_CONFIG_PATH,
+# ...), so relax `set -u` while sourcing them.
+set +u
 # shellcheck disable=SC1090
 source "/opt/ros/$ROS_DISTRO/setup.bash"
-WS="${ISAAC_ROS_WS:-/workspaces/isaac_ros-dev}"
-[ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash"
+if [ -f "$WS/install/setup.bash" ]; then source "$WS/install/setup.bash"; fi
+set -u
 log "ROS 2 $ROS_DISTRO, workspace $WS"
 
 # ── Rust + ghost-core ─────────────────────────────────────────────────────────
