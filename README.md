@@ -9,6 +9,9 @@ Our system pairs an autonomous drone that searches a comms-denied area with a **
 ![Brainstorm whiteboard — CH-1](brainstorm_1.png)
 *Day 1 brainstorm whiteboard (CH-1). Where it started; see "How the idea evolved" below.*
 
+![Operational loop](Operational_Loop.png)
+*Operational loop: TOC → drone → on objective → return → TOC.*
+
 ---
 
 ## The problem
