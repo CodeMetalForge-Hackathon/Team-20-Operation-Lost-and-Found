@@ -48,6 +48,8 @@ controller_server:
       batch_size: 1000
       iteration_count: 1
       motion_model: "Omni"           # mecanum: can strafe
+      Omni:                          # Nav2 Kilted+: motion models are plugins
+        plugin: "mppi::OmniMotionModel"
       vx_max: 0.30
       vx_min: -0.20
       vy_max: 0.25

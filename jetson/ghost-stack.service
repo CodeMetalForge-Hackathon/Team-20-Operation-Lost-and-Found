@@ -11,6 +11,11 @@
 #
 # Runs as root inside the container (like `docker exec`), because the image's
 # entrypoint user is not in `dialout` and could not open the motor board.
+# Python deps (jetson/requirements.txt: websockets, pyserial, pyzmq) are not in
+# the image; HOME=/workspaces/isaac_ros-dev makes Python load them from the
+# workspace user site. Install/refresh once with:
+#   docker exec -e HOME=/workspaces/isaac_ros-dev isaac_ros_dev_container \
+#     python3 -m pip install --user --break-system-packages -r /workspaces/isaac_ros-dev/ghost/jetson/requirements.txt
 # Do not also run jetson/start.sh in the dev container while this is active:
 # both bind port 9001/5555 and drive the same motors.
 
@@ -41,7 +46,8 @@ ExecStart=/usr/bin/docker run --rm --name ghost_stack \
   jetson/start.sh
 # docker stop sends SIGTERM to start.sh (the container's PID 1), which Ctrl-Cs
 # every process group and escalates after 10 s; allow it time to finish.
-ExecStop=/usr/bin/docker stop -t 30 ghost_stack
+# "-": if the stack already exited, the container is gone and stop is a no-op.
+ExecStop=-/usr/bin/docker stop -t 30 ghost_stack
 TimeoutStopSec=45
 Restart=always
 RestartSec=10
