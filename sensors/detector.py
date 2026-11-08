@@ -13,6 +13,7 @@ Get the models with pi/get_models.sh.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 from pathlib import Path
 
@@ -123,6 +124,11 @@ class PersonDetector:
             self._cfg = self._stack.enter_context(model.configure())
             self.size = model.input().shape[0]
             self._out = np.empty(model.output().shape, dtype=np.float32)
+            # Release the device before the interpreter tears down: a process
+            # exiting with a shared (hailort_service) VDevice still open
+            # segfaults and takes the service — and every other user — down.
+            # fusion.py exits on purpose whenever the core goes away.
+            atexit.register(self.close)
             return True
         except Exception as exc:
             print(f"[detector] Hailo unavailable ({exc}) — trying CPU")
@@ -188,5 +194,6 @@ class PersonDetector:
         return out
 
     def close(self) -> None:
-        if self.backend == "hailo":
-            self._stack.close()
+        if self.backend == "hailo" and getattr(self, "_stack", None) is not None:
+            stack, self._stack = self._stack, None
+            stack.close()

@@ -89,8 +89,18 @@ class Cups:
     def run(self, img):
         h, w = img.shape[:2]
         with self.lock:
-            out = [(c, s, (b[0] * w, b[1] * h, b[2] * w, b[3] * h)) for c, s, b in self.det.detect_classes(img, COCO)]
-        return out
+            try:
+                raw = self.det.detect_classes(img, COCO)
+            except Exception as e:   # noqa: BLE001  — e.g. hailort_service restarted under us
+                print(f"[cups] Hailo call failed ({e!r}) — reopening the device", flush=True)
+                try:
+                    self.det.close()
+                except Exception:   # noqa: BLE001
+                    pass
+                time.sleep(0.5)
+                self.det = PersonDetector(conf=self.a.conf)
+                raw = self.det.detect_classes(img, COCO)
+        return [(c, s, (b[0] * w, b[1] * h, b[2] * w, b[3] * h)) for c, s, b in raw]
 
     def detect(self, img, tile):
         H, W = img.shape[:2]
