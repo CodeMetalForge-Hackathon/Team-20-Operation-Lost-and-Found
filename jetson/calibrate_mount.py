@@ -24,7 +24,8 @@ so it is blended into the saved one (--yaw-weight of the way, a running
 average) — unless it is more than --yaw-jump off, which means the mount moved:
 then the new measurement is taken outright.
 
-Each part is applied only if it passes its quality checks; otherwise the value
+If something stands in that drive box, neither part runs (an object close in
+front also gets into the floor fit).  Each part is applied only if it passes its quality checks; otherwise the value
 the stack was started with is kept.  The env file is written either way, with
 CAM_PITCH, CAM_ROLL, CAM_YAW (deg, ROS sign) and FLOOR_Z (m).  Exit 0 = file
 written, 1 = nothing usable (no TF / cloud).
@@ -229,7 +230,13 @@ def main():
             f"yaw {math.degrees(yaw0):+.2f}°")
 
         roll, pitch, floor_z = roll0, pitch0, None
-        Rn, fz, info = calibrate_floor(node, a)
+        # something close in front: its lower part gets into the floor fit (a
+        # box 0.24 m ahead tilted it by ~0.5°), and the drive would hit it
+        blocked = path_blocked(node, a, a.floor_z)
+        if blocked:
+            Rn, fz, info = None, None, f"not fitted — {blocked}; kept pitch {math.degrees(pitch0):+.2f}°, roll {math.degrees(roll0):+.2f}°"
+        else:
+            Rn, fz, info = calibrate_floor(node, a)
         log(f"floor: {info}")
         if Rn is not None:
             roll, pitch, _ = rpy_of(Rn); floor_z = fz
@@ -240,7 +247,7 @@ def main():
         if a.no_drive:
             log("yaw: --no-drive, kept")
         else:
-            blocked = path_blocked(node, a, floor_z if floor_z is not None else a.floor_z)
+            blocked = blocked or path_blocked(node, a, floor_z if floor_z is not None else a.floor_z)
             if blocked:
                 log(f"yaw: not driving — {blocked}; kept {math.degrees(yaw0):+.2f}°")
             else:
@@ -254,8 +261,8 @@ def main():
                  f"CAM_PITCH={math.degrees(pitch):.2f}",
                  f"CAM_ROLL={math.degrees(roll):.2f}",
                  f"CAM_YAW={math.degrees(yaw):.2f}"]
-        if floor_z is not None:
-            lines.append(f"FLOOR_Z={floor_z:.4f}")
+        # not fitted: keep the one the stack started with (start.sh passes it as --floor-z)
+        lines.append(f"FLOOR_Z={floor_z if floor_z is not None else a.floor_z:.4f}")
         log("result: " + "  ".join(lines[1:]))
         if a.out:
             with open(a.out, "w") as fh:
