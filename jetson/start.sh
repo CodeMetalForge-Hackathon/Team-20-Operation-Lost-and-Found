@@ -34,13 +34,38 @@ set -u
 STAMP_ARGS=(); [ "$ROS_DISTRO" = "humble" ] && STAMP_ARGS=(--unstamped)
 echo "[ghost] ROS 2 $ROS_DISTRO  workspace ${WS}"
 
+# Job control: each background job gets its own process group (pgid = its PID)
+# and, unlike plain `&` in a script, does not start with SIGINT ignored.  So on
+# stop we can Ctrl-C each whole group the way a terminal would: ros2 launch
+# shuts its nodes down cleanly and base_driver zeroes the wheels.  Plain
+# SIGTERM to the top PID left launch children (static TF publishers, cuVSLAM
+# container) running, still publishing stale transforms.
+set -m
 PIDS=()
+group_alive() {   # any non-zombie process left in this process group?
+  ps -o stat= -g "$1" 2>/dev/null | grep -qv '^Z'
+}
+any_alive() {
+  local p; for p in "${PIDS[@]}"; do group_alive "$p" && return 0; done; return 1
+}
+signal_all() {
+  local p; for p in "${PIDS[@]}"; do kill "-$1" -- "-$p" 2>/dev/null; done
+}
 cleanup() {
+  [ -n "${STOPPING:-}" ] && return; STOPPING=1
+  trap '' INT TERM
   echo "[ghost] stopping…"
-  kill "${PIDS[@]}" 2>/dev/null
+  signal_all INT
+  for _ in $(seq 1 50); do any_alive || break; sleep 0.2; done   # up to 10 s
+  if any_alive; then
+    echo "[ghost] still running after 10 s — SIGTERM"; signal_all TERM; sleep 3
+    any_alive && { echo "[ghost] SIGKILL"; signal_all KILL; }
+  fi
   wait 2>/dev/null
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 start() {   # start NAME CMD…  → background, logged
   local name="$1"; shift
   echo "[ghost] $name → $LOGS/$name.log"
