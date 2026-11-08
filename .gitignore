@@ -6,3 +6,5 @@ jetson/logs/
 .demo-logs/
 jetson/config/mount_calibration.env*
 jetson/config/stack.env
+# HailoRT runtime logs (written next to whatever runs on the Pi)
+hailort*.log
