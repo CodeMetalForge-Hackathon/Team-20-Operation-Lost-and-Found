@@ -19,7 +19,10 @@ comes out too (→ obstacle_filter.py --floor-z).
 
 Yaw: the drive test from calibrate_yaw.py (fixed-speed legs, fwd then back).
 Before driving it checks the depth cloud for anything standing in the drive
-box ahead and skips the drive if so.
+box ahead and skips the drive if so.  One boot's yaw is only good to ~±0.5°,
+so it is blended into the saved one (--yaw-weight of the way, a running
+average) — unless it is more than --yaw-jump off, which means the mount moved:
+then the new measurement is taken outright.
 
 Each part is applied only if it passes its quality checks; otherwise the value
 the stack was started with is kept.  The env file is written either way, with
@@ -170,7 +173,11 @@ def calibrate_yaw(node, a, mount_yaw):
         bad.append(f"fwd/back disagree by {abs(f - b):.2f}° (wheels crabbing?)")
     if bad:
         return None, info + " — not applied: " + "; ".join(bad)
-    return mount_yaw - alpha, info
+    measured = mount_yaw - alpha
+    if abs(math.degrees(alpha)) > a.yaw_jump:
+        return measured, info + f" — {abs(math.degrees(alpha)):.2f}° off the saved yaw: mount moved, taken outright"
+    return mount_yaw - a.yaw_weight * alpha, info + (f" — measured {math.degrees(measured):+.2f}°, "
+                                                     f"blended {a.yaw_weight:.0%} into the saved yaw")
 
 
 def main():
@@ -189,6 +196,10 @@ def main():
     ap.add_argument("--max-turn", type=float, default=3.0, help="deg per leg, else wheels suspect")
     ap.add_argument("--max-spread", type=float, default=2.5, help="deg across legs")
     ap.add_argument("--max-disagree", type=float, default=3.0, help="deg between fwd and back means")
+    ap.add_argument("--yaw-weight", type=float, default=0.25,
+                    help="share of a new yaw measurement blended into the saved yaw (1 = no averaging)")
+    ap.add_argument("--yaw-jump", type=float, default=2.5,
+                    help="deg: a measurement this far off the saved yaw replaces it (mount moved)")
     ap.add_argument("--clear-ahead", type=float, default=0.60, help="m of floor that must be clear ahead")
     ap.add_argument("--clear-half-width", type=float, default=0.22, help="m")
     ap.add_argument("--block-pts", type=int, default=40, help="points above the floor that count as blocked")
