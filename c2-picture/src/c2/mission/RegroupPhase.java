@@ -11,7 +11,7 @@ public class RegroupPhase implements MissionPhase {
     private static final Duration TURNAROUND = Duration.ofMinutes(3);
     private Instant enteredAt;
 
-    @Override public String name() { return "REGROUP: report ingested, replanning"; }
+    @Override public String name() { return "REGROUP"; }
 
     @Override
     public void enter(MissionController controller) { enteredAt = controller.picture().now(); }

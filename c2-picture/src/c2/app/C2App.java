@@ -44,11 +44,11 @@ public class C2App {
                 ? new SimulatedDroneFeed(inbox, Scenario.FRAME, picture.terrain(), Scenario.TRUE_SUBJECT, 7) : null;
         controller = new MissionController(picture, engine, queue, simulated,
                 new MissionOrderWriter(outFolder, Scenario.FRAME), new PathExporter(outFolder, Scenario.FRAME),
-                new MapStateWriter(outFolder), Scenario.SUBJECT, Scenario.DRONE, Scenario.TOC,
+                new MapStateWriter(outFolder), Scenario.SUBJECT, Scenario.DRONES, Scenario.TOC,
                 "Locate the lost hiker, assess casualty, guide rescue.");
         reportAdapter = new DroneReportFolderAdapter(inbox);
         camera = new Camera(Scenario.FRAME.rows(), Scenario.FRAME.cols(),
-                Scenario.LAST_KNOWN.row() + 15, Scenario.LAST_KNOWN.col() - 10, 1);
+                Scenario.LAST_KNOWN.row() + 2, Scenario.LAST_KNOWN.col() + 14, 1);
         terrainCache = new TerrainImageCache(picture.terrain(), Scenario.FRAME.rows(), Scenario.FRAME.cols());
         sprites = new SpriteLibrary(assets);
         clock.addListener(controller);

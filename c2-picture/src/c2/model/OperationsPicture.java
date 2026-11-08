@@ -15,32 +15,38 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * The digital twin (AirCom's GameBoard role). Holds terrain, belief, objects, paths, alerts.
+ * The digital twin (AirCom's GameBoard role). Holds terrain, belief, objects, zones, patrols, paths, alerts.
  * Observer subject: changes are collected during an update and sent to observers after it.
  *
  * Threading: writers call update(...); readers (views) wrap reads in synchronized (picture).
  */
 public class OperationsPicture {
-    private static final int ALERTS_KEPT = 8;
+    private static final int ALERTS_KEPT = 10;
 
     private final GeoFrame frame;
     private final TerrainGrid terrain;
     private final BeliefGrid belief;
     private final Map<String, MapObject> objects = new LinkedHashMap<>();
+    private final List<Zone> zones = new ArrayList<>();
+    private final List<PatrolRoute> patrols = new ArrayList<>();
+    private final Map<String, TravelPath> plannedPaths = new LinkedHashMap<>();
     private final List<TravelPath> flownTracks = new ArrayList<>();
     private final Deque<Alert> alerts = new ArrayDeque<>();
     private final List<PictureObserver> observers = new CopyOnWriteArrayList<>();
     private final List<PictureEvent> pendingEvents = new ArrayList<>();
+    private final Instant start;
 
-    private TravelPath plannedPath;
+    private List<SortieView> sorties = List.of();
     private Instant now;
     private String phaseName = "-";
-    private String sortieStatus = "-";
+    private int contacts = 0;
+    private int sortiesFlown = 0;
 
     public OperationsPicture(GeoFrame frame, TerrainGrid terrain, Instant start) {
         this.frame = frame;
         this.terrain = terrain;
         this.belief = new BeliefGrid(frame.rows(), frame.cols());
+        this.start = start;
         this.now = start;
     }
 
@@ -66,11 +72,27 @@ public class OperationsPicture {
     public MapObject object(String id) { return objects.get(id); }
     public Collection<MapObject> objects() { return objects.values(); }
 
-    public void setPlannedPath(TravelPath path) {
-        plannedPath = path;
-        changed(PictureEventType.PATH_PLANNED, path == null ? "cleared" : path.id());
+    public void addZone(Zone zone) { zones.add(zone); }
+    public List<Zone> zones() { return zones; }
+    public boolean insideZone(GridPos pos, ZoneType type) {
+        for (Zone zone : zones) if (zone.type() == type && zone.contains(pos)) return true;
+        return false;
     }
-    public void addFlownTrack(TravelPath track) { flownTracks.add(track); }
+
+    public void addPatrol(PatrolRoute patrol) { patrols.add(patrol); }
+    public List<PatrolRoute> patrols() { return patrols; }
+
+    public void putPlannedPath(TravelPath path) {
+        plannedPaths.put(path.id(), path);
+        changed(PictureEventType.PATH_PLANNED, path.id());
+    }
+    public void removePlannedPath(String pathId) {
+        plannedPaths.remove(pathId);
+        changed(PictureEventType.PATH_PLANNED, "cleared " + pathId);
+    }
+    public Collection<TravelPath> plannedPaths() { return plannedPaths.values(); }
+    public void addFlownTrack(TravelPath track) { flownTracks.add(track); sortiesFlown++; }
+    public List<TravelPath> flownTracks() { return flownTracks; }
 
     public void raise(Alert alert) {
         alerts.addFirst(alert);
@@ -78,20 +100,22 @@ public class OperationsPicture {
         changed(PictureEventType.ALERT_RAISED, alert.text());
     }
 
+    public void countContact() { contacts++; }
+    public void setSorties(List<SortieView> views) { sorties = List.copyOf(views); }
     public void setNow(Instant time) { now = time; }
     public void setPhaseName(String name) {
         phaseName = name;
         changed(PictureEventType.PHASE_CHANGED, name);
     }
-    public void setSortieStatus(String status) { sortieStatus = status; }
 
     public GeoFrame frame() { return frame; }
     public TerrainGrid terrain() { return terrain; }
     public BeliefGrid belief() { return belief; }
-    public TravelPath plannedPath() { return plannedPath; }
-    public List<TravelPath> flownTracks() { return flownTracks; }
     public Collection<Alert> alerts() { return alerts; }
+    public List<SortieView> sorties() { return sorties; }
+    public Instant start() { return start; }
     public Instant now() { return now; }
     public String phaseName() { return phaseName; }
-    public String sortieStatus() { return sortieStatus; }
+    public int contacts() { return contacts; }
+    public int sortiesFlown() { return sortiesFlown; }
 }

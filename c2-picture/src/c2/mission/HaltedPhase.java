@@ -12,7 +12,7 @@ public class HaltedPhase implements MissionPhase {
 
     public HaltedPhase(MissionPhase resumeTo) { this.resumeTo = resumeTo; }
 
-    @Override public String name() { return "HALTED (R to resume)"; }
+    @Override public String name() { return "HALTED"; }
     @Override public void enter(MissionController controller) { }
 
     @Override

@@ -13,6 +13,8 @@ import c2.search.SearchEngine;
 
 /** Applies a returned drone's report to the picture: evidence to the engine, HOLO -> SOLID, alerts. */
 public final class ReportIngest {
+    private static final double HOSTILE_MATCH_CELLS = 8;
+
     private ReportIngest() { }
 
     public static void apply(OperationsPicture picture, SearchEngine engine, DroneReport report, String subjectId) {
@@ -21,6 +23,7 @@ public final class ReportIngest {
         MapObject subject = picture.object(subjectId);
         if (report.sighting() != null && subject != null) {
             subject.confirm(report.sighting(), report.returnedAt(), Source.REPORT);
+            picture.countContact();
             picture.changed(PictureEventType.OBJECT_CONFIRMED, subjectId);
             picture.raise(new Alert(report.returnedAt(), AlertLevel.CONTACT,
                     "CONTACT " + report.sortieId() + " at " + report.sighting().row() + "," + report.sighting().col()));
@@ -35,6 +38,21 @@ public final class ReportIngest {
                         "URGENT CASUALTY: " + String.join(", ", report.medical().needsAttention())));
             } else if (report.medical().canEscort()) {
                 picture.raise(new Alert(report.returnedAt(), AlertLevel.INFO, "Casualty can walk: escort possible"));
+            }
+        }
+
+        for (var seen : report.hostilesSeen()) {                      // match each sighting to the nearest predicted hostile
+            MapObject nearest = null;
+            double nearestDistance = HOSTILE_MATCH_CELLS;
+            for (MapObject object : picture.objects()) {
+                if (object.kind() != ObjectKind.HOSTILE) continue;
+                double distance = object.pos().distanceTo(seen);
+                if (distance <= nearestDistance) { nearest = object; nearestDistance = distance; }
+            }
+            if (nearest != null) {
+                nearest.confirm(seen, report.returnedAt(), Source.REPORT);
+                picture.changed(PictureEventType.OBJECT_CONFIRMED, nearest.id());
+                picture.raise(new Alert(report.returnedAt(), AlertLevel.CONTACT, "Hostile confirmed: " + nearest.label()));
             }
         }
 

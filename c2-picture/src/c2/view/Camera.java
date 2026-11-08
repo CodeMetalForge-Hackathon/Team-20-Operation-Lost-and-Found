@@ -5,7 +5,7 @@ import c2.input.CommandSink;
 
 /** What part of the board is in view: a center square and a zoom level. */
 public class Camera implements CommandSink {
-    public static final int[] TILE_WIDTHS = {6, 12, 24};
+    public static final int[] TILE_WIDTHS = {6, 12, 24, 40};
     private static final int PAN_STEP_CELLS = 6;
 
     private volatile double centerRow, centerCol;

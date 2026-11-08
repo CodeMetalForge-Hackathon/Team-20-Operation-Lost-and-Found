@@ -15,9 +15,13 @@ import c2.model.DroneReport;
 import c2.model.GridPos;
 import c2.model.Knowledge;
 import c2.model.MapObject;
+import c2.model.ObjectKind;
 import c2.model.OperationsPicture;
+import c2.model.PatrolRoute;
+import c2.model.SortieView;
 import c2.model.Source;
 import c2.model.TravelPath;
+import c2.model.Waypoint;
 import c2.observe.PictureEventType;
 import c2.search.SearchEngine;
 import c2.time.TickListener;
@@ -26,10 +30,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * State pattern context and clock listener. Each tick: apply what arrived, let time act on the
- * picture (belief spreads, confirmations age), then let the current phase run.
+ * picture (belief spreads, patrols move, confirmations age), then let the current phase run.
  */
 public class MissionController implements TickListener, CommandSink {
     private static final Duration SOLID_LIFETIME = Duration.ofMinutes(15);
@@ -42,17 +48,18 @@ public class MissionController implements TickListener, CommandSink {
     private final MissionOrderWriter orderWriter;
     private final PathExporter pathExporter;
     private final MapStateWriter mapStateWriter;
-    private final String subjectId, droneId, tocId;
+    private final String subjectId, tocId;
+    private final List<String> droneIds;
     private final String intent;
 
     private MissionPhase phase;
-    private Sortie currentSortie;
-    private int sortieCount = 0;
+    private final List<Sortie> activeSorties = new ArrayList<>();
+    private int waveCount = 0;
 
     public MissionController(OperationsPicture picture, SearchEngine engine, InboundQueue queue,
                              SimulatedDroneFeed simulatedDrone, MissionOrderWriter orderWriter,
                              PathExporter pathExporter, MapStateWriter mapStateWriter,
-                             String subjectId, String droneId, String tocId, String intent) {
+                             String subjectId, List<String> droneIds, String tocId, String intent) {
         this.picture = picture;
         this.engine = engine;
         this.queue = queue;
@@ -61,7 +68,7 @@ public class MissionController implements TickListener, CommandSink {
         this.pathExporter = pathExporter;
         this.mapStateWriter = mapStateWriter;
         this.subjectId = subjectId;
-        this.droneId = droneId;
+        this.droneIds = droneIds;
         this.tocId = tocId;
         this.intent = intent;
     }
@@ -80,6 +87,7 @@ public class MissionController implements TickListener, CommandSink {
             }
             engine.advance(picture, elapsed);
             if (simulatedDrone != null) simulatedDrone.wander(elapsed.toMillis() / 60000.0);
+            movePatrols(now);
             ageConfirmations(now, elapsed);
             MissionPhase next = phase.onTick(this, now, elapsed);
             if (next != phase) transitionTo(next);
@@ -97,61 +105,102 @@ public class MissionController implements TickListener, CommandSink {
 
     // ---- called by phases -------------------------------------------------
 
-    void launchNewSortie() {
-        sortieCount++;
-        String sortieId = "S" + sortieCount;
+    /** One wave: every drone gets its own route; later drones avoid earlier drones' targets. */
+    void launchWave() {
+        waveCount++;
+        activeSorties.clear();
         GridPos launchPoint = picture.object(tocId).pos();
-        TravelPath route = engine.planRoute(picture, sortieId, launchPoint, picture.now());
-        currentSortie = new Sortie(sortieId, route);
-        picture.setPlannedPath(route);
-        orderWriter.write(sortieId, route, route.end().plus(Sortie.OVERDUE_GRACE), intent);
-        pathExporter.export(route);
+        List<GridPos> takenTargets = new ArrayList<>();
+        for (int index = 0; index < droneIds.size(); index++) {
+            String sortieId = "W" + waveCount + "-" + (char) ('A' + index);
+            Instant depart = picture.now().plusSeconds(index * 60L);          // staggered one minute apart
+            TravelPath route = engine.planRoute(picture, sortieId, launchPoint, depart, takenTargets);
+            for (Waypoint waypoint : route.waypoints()) takenTargets.add(waypoint.pos());
+            Sortie sortie = new Sortie(sortieId, droneIds.get(index), route);
+            activeSorties.add(sortie);
+            picture.putPlannedPath(route);
+            orderWriter.write(sortieId, route, route.end().plus(Sortie.OVERDUE_GRACE), intent);
+            if (index == 0) pathExporter.export(route);
+        }
         mapStateWriter.write(picture, subjectId);
-        picture.raise(new Alert(picture.now(), AlertLevel.INFO, sortieId + " launched: "
-                + (route.waypoints().size() - 2) + " targets, back ~" + CLOCK.format(route.end())));
+        picture.raise(new Alert(picture.now(), AlertLevel.INFO, "Wave " + waveCount + ": "
+                + droneIds.size() + " UAVs launched"));
+        publishSorties();
     }
 
-    void predictDroneAlongRoute(Instant now) {
-        MapObject drone = picture.object(droneId);
-        drone.moveTo(currentSortie.route().positionAt(now));
-        drone.revertToHolo();
-        picture.setSortieStatus(currentSortie.id() + " out, due " + CLOCK.format(currentSortie.expectedReturn()));
+    void predictDroneAlongRoute(Sortie sortie, Instant now) {
+        MapObject drone = picture.object(sortie.droneId());
+        drone.moveTo(sortie.route().positionAt(now));
+        if (now.isAfter(sortie.route().start())) drone.revertToHolo();
     }
 
-    void sortieLanded(Instant now) {
-        currentSortie.markLanded();
-        MapObject drone = picture.object(droneId);
+    void sortieLanded(Sortie sortie, Instant now) {
+        sortie.markLanded();
+        MapObject drone = picture.object(sortie.droneId());
         drone.confirm(picture.object(tocId).pos(), now, Source.ANCHOR);
-        picture.changed(PictureEventType.OBJECT_CONFIRMED, droneId);
-        picture.setSortieStatus(currentSortie.id() + " landed, awaiting report");
-        if (simulatedDrone != null) simulatedDrone.sortieLanded(currentSortie.id(), currentSortie.route(), now);
+        picture.changed(PictureEventType.OBJECT_CONFIRMED, sortie.droneId());
+        if (simulatedDrone != null) simulatedDrone.sortieLanded(sortie.id(), sortie.route(), now, hostilePositions());
     }
 
     void raiseOverdue(Sortie sortie) {
         picture.raise(new Alert(picture.now(), AlertLevel.OVERDUE, sortie.id() + " OVERDUE, no report"));
     }
 
-    Sortie currentSortie() { return currentSortie; }
+    void writeOffLost(Sortie sortie) {
+        picture.removePlannedPath(sortie.id());
+        picture.raise(new Alert(picture.now(), AlertLevel.OVERDUE, sortie.id() + " presumed LOST"));
+    }
+
+    void publishSorties() {
+        List<SortieView> views = new ArrayList<>();
+        for (Sortie sortie : activeSorties) {
+            String status = sortie.isReportReceived() ? "REPORTED" : sortie.isLost() ? "LOST"
+                    : sortie.isLanded() ? "LANDED" : "OUT";
+            views.add(new SortieView(sortie.id(), picture.object(sortie.droneId()).label(),
+                    sortie.route().start(), sortie.expectedReturn(), status));
+        }
+        picture.setSorties(views);
+    }
+
+    List<Sortie> activeSorties() { return activeSorties; }
     OperationsPicture picture() { return picture; }
 
     // ---- internals ----------------------------------------------------------
 
     private void ingest(DroneReport report) {
         ReportIngest.apply(picture, engine, report, subjectId);
-        if (currentSortie != null && currentSortie.id().equals(report.sortieId())) {
-            currentSortie.markReportReceived();
-            picture.addFlownTrack(currentSortie.route().asFlown());
-            picture.setPlannedPath(null);
-            picture.setSortieStatus(currentSortie.id() + " report ingested");
+        for (Sortie sortie : activeSorties) {
+            if (sortie.id().equals(report.sortieId())) {
+                sortie.markReportReceived();
+                picture.addFlownTrack(sortie.route().asFlown());
+                picture.removePlannedPath(sortie.id());
+            }
         }
         mapStateWriter.write(picture, subjectId);
+        publishSorties();
+    }
+
+    private List<GridPos> hostilePositions() {
+        List<GridPos> positions = new ArrayList<>();
+        for (MapObject object : picture.objects()) if (object.kind() == ObjectKind.HOSTILE) positions.add(object.pos());
+        return positions;
+    }
+
+    /** Hostiles with a predicted patrol are moved around their loop as time passes. */
+    private void movePatrols(Instant now) {
+        for (PatrolRoute patrol : picture.patrols()) {
+            MapObject hostile = picture.object(patrol.objectId());
+            if (hostile != null && hostile.knowledge() == Knowledge.HOLO) {
+                hostile.moveTo(patrol.positionAt(picture.start(), now));
+            }
+        }
     }
 
     /** SOLID moving objects fade to HOLO after SOLID_LIFETIME; HOLO subject follows the belief peak. */
     private void ageConfirmations(Instant now, Duration elapsed) {
         double minutes = elapsed.toMillis() / 60000.0;
         for (MapObject object : picture.objects()) {
-            if (!object.kind().moves || object.id().equals(droneId)) continue;
+            if (!object.kind().moves || object.kind() == ObjectKind.DRONE) continue;
             if (object.knowledge() == Knowledge.SOLID) {
                 Duration age = object.ageAt(now);
                 if (age != null && age.compareTo(SOLID_LIFETIME) > 0) {
@@ -159,7 +208,7 @@ public class MissionController implements TickListener, CommandSink {
                     picture.changed(PictureEventType.OBJECT_AGED, object.id());
                 }
             } else {
-                object.growUncertainty(minutes * 0.15, 30);
+                object.growUncertainty(minutes * 0.15, object.kind() == ObjectKind.SUBJECT ? 30 : 10);
             }
         }
         MapObject subject = picture.object(subjectId);

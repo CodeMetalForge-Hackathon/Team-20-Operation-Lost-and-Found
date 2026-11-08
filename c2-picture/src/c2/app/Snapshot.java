@@ -21,6 +21,9 @@ public class Snapshot {
         app.controller.begin();
         IsoBoardView board = new IsoBoardView(app.picture, app.terrainCache, app.camera, app.sprites);
         SitrepPanel sitrep = new SitrepPanel(app.picture, app.clock);
+        if (args.length > 2) for (int step = 0; step < Integer.parseInt(args[2]); step++) {
+            app.camera.submit(c2.input.Command.of(c2.input.CommandType.ZOOM_IN));
+        }
         int every = Math.max(1, ticks / 4);
         for (int tick = 1; tick <= ticks; tick++) {
             app.clock.tick();
@@ -30,13 +33,11 @@ public class Snapshot {
     }
 
     private static void save(IsoBoardView board, SitrepPanel sitrep, Path file) throws Exception {
-        BufferedImage image = new BufferedImage(1100 + 340, 760, BufferedImage.TYPE_INT_RGB);
+        BufferedImage image = new BufferedImage(1100 + SitrepPanel.WIDTH, 780, BufferedImage.TYPE_INT_RGB);
         Graphics2D pen = image.createGraphics();
-        board.paintBoard(pen, 1100, 760);
+        board.paintBoard(pen, 1100, 780);
         pen.translate(1100, 0);
-        pen.setColor(new java.awt.Color(14, 20, 16));
-        pen.fillRect(0, 0, 340, 760);
-        sitrep.paintPanel(pen);
+        sitrep.paintPanel(pen, SitrepPanel.WIDTH, 780);
         pen.dispose();
         ImageIO.write(image, "png", file.toFile());
         System.out.println("saved " + file);

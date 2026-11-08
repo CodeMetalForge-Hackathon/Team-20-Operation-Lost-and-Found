@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.StringJoiner;
@@ -22,6 +23,7 @@ import java.util.StringJoiner;
 public class SimulatedDroneFeed {
     private static final double SIGHTING_CHANCE_IN_RANGE = 0.75;
     private static final int SENSOR_RANGE_CELLS = 2;
+    private static final int HOSTILE_SPOT_CELLS = 14;      // hostiles are spotted from stand-off range (~700 m)
 
     private final Path inbox;
     private final GeoFrame frame;
@@ -49,7 +51,7 @@ public class SimulatedDroneFeed {
     }
 
     /** Sortie landed: write its report into the inbox. */
-    public void sortieLanded(String sortieId, TravelPath flown, Instant landedAt) {
+    public void sortieLanded(String sortieId, TravelPath flown, Instant landedAt, List<GridPos> hostiles) {
         Set<GridPos> swept = PathGeometry.sweptCells(flown, frame, 1);
         GridPos sighting = null;
         for (GridPos cell : swept) {
@@ -58,6 +60,11 @@ public class SimulatedDroneFeed {
                 sighting = trueSubject;
                 break;
             }
+        }
+        StringJoiner hostilesJson = new StringJoiner(",", "[", "]");
+        for (GridPos hostile : hostiles) {
+            boolean passedNear = swept.stream().anyMatch(cell -> cell.distanceTo(hostile) <= HOSTILE_SPOT_CELLS);
+            if (passedNear && random.nextDouble() < 0.8) hostilesJson.add("[" + hostile.row() + "," + hostile.col() + "]");
         }
         StringJoiner sweptJson = new StringJoiner(",", "[", "]");
         for (GridPos cell : swept) sweptJson.add("[" + cell.row() + "," + cell.col() + "]");
@@ -68,6 +75,7 @@ public class SimulatedDroneFeed {
                 + "  \"swept_cells\": " + sweptJson + ",\n"
                 + "  \"sighting\": " + (sighting == null ? "null" : "[" + sighting.row() + "," + sighting.col() + "]") + ",\n"
                 + "  \"hazards_seen\": [],\n"
+                + "  \"hostiles_seen\": " + hostilesJson + ",\n"
                 + "  \"medical\": " + (sighting == null ? "null" : sampleMedical()) + "\n"
                 + "}\n";
         try {

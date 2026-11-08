@@ -1,13 +1,16 @@
 package c2.view;
 
 import c2.model.BeliefGrid;
+import c2.model.GridPos;
 import c2.model.Knowledge;
 import c2.model.MapObject;
 import c2.model.ObjectKind;
 import c2.model.OperationsPicture;
+import c2.model.PatrolRoute;
 import c2.model.TerrainGrid;
 import c2.model.TravelPath;
 import c2.model.Waypoint;
+import c2.model.Zone;
 import c2.observe.PictureEvent;
 import c2.observe.PictureObserver;
 
@@ -25,12 +28,15 @@ import java.awt.RenderingHints;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Path2D;
 import java.awt.image.BufferedImage;
+import java.util.List;
 
-/** The isometric board. Observer of the picture; draws terrain (cached), belief, paths, objects. */
+/** The isometric board. Observer of the picture; draws terrain (cached), zones, heat, paths, objects. */
 public class IsoBoardView extends JPanel implements PictureObserver {
     private static final KnowledgeStyle HOLO = new HoloStyle();
     private static final KnowledgeStyle SOLID = new SolidStyle();
-    private static final Color BACKGROUND = new Color(12, 16, 20);
+    private static final Color BACKGROUND = new Color(8, 11, 16);
+    private static final Color DRONE_CYAN = new Color(60, 230, 230);
+    private static final Color ENEMY_RED = new Color(235, 50, 50);
 
     private final OperationsPicture picture;
     private final TerrainImageCache terrainCache;
@@ -44,7 +50,7 @@ public class IsoBoardView extends JPanel implements PictureObserver {
         this.terrainCache = terrainCache;
         this.camera = camera;
         this.sprites = sprites;
-        setPreferredSize(new Dimension(1100, 760));
+        setPreferredSize(new Dimension(1100, 780));
         setBackground(BACKGROUND);
         setFocusable(true);
     }
@@ -58,15 +64,16 @@ public class IsoBoardView extends JPanel implements PictureObserver {
         long started = System.nanoTime();
         paintBoard((Graphics2D) graphics, getWidth(), getHeight());
         lastFrameMillis = (System.nanoTime() - started) / 1e6;
-        graphics.setColor(new Color(150, 160, 170));
+        graphics.setColor(new Color(130, 145, 160));
         graphics.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-        graphics.drawString(String.format("frame %.1f ms   zoom %d   arrows pan  Z/X zoom", lastFrameMillis,
-                camera.zoomIndex()), 10, getHeight() - 10);
+        graphics.drawString(String.format("frame %.1f ms   zoom %d/%d   arrows pan  Z/X zoom", lastFrameMillis,
+                camera.zoomIndex() + 1, Camera.TILE_WIDTHS.length), 12, getHeight() - 12);
     }
 
     /** All drawing, separate from Swing so it can also render off-screen (snapshots, tests). */
     public void paintBoard(Graphics2D pen, int viewWidth, int viewHeight) {
         pen.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        pen.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         pen.setColor(BACKGROUND);
         pen.fillRect(0, 0, viewWidth, viewHeight);
 
@@ -82,34 +89,112 @@ public class IsoBoardView extends JPanel implements PictureObserver {
         pen.drawImage(terrainImage, offsetX, offsetY, null);
         pen.translate(offsetX, offsetY);
         synchronized (picture) {
-            drawBelief(pen, iso, terrain);
-            var tracks = picture.flownTracks();                                  // only the last two flown tracks, to keep it readable
-            for (int index = Math.max(0, tracks.size() - 2); index < tracks.size(); index++) {
+            for (Zone zone : picture.zones()) drawZone(pen, iso, terrain, zone, clockSeconds);
+            drawBelief(pen, iso, terrain, clockSeconds);
+            for (PatrolRoute patrol : picture.patrols()) drawPatrol(pen, iso, terrain, patrol, clockSeconds);
+            List<TravelPath> tracks = picture.flownTracks();                     // only the latest flown tracks
+            for (int index = Math.max(0, tracks.size() - 3); index < tracks.size(); index++) {
                 drawPath(pen, iso, terrain, tracks.get(index), clockSeconds);
             }
-            if (picture.plannedPath() != null) drawPath(pen, iso, terrain, picture.plannedPath(), clockSeconds);
+            for (TravelPath path : picture.plannedPaths()) drawPath(pen, iso, terrain, path, clockSeconds);
             for (MapObject object : picture.objects()) drawObject(pen, iso, terrain, object, clockSeconds);
         }
         pen.translate(-offsetX, -offsetY);
         drawLegend(pen);
     }
 
-    /** Probability as a translucent red overlay (it's a prediction, so holo-style). */
-    private void drawBelief(Graphics2D pen, IsoProjection iso, TerrainGrid terrain) {
+    private Path2D.Double groundOutline(IsoProjection iso, TerrainGrid terrain, List<GridPos> cells, double lift) {
+        Path2D.Double outline = new Path2D.Double();
+        boolean first = true;
+        for (GridPos corner : cells) {
+            GridPos clamped = picture.frame().clamp(corner);
+            double h = terrain.at(clamped).heightMeters() + lift;
+            double x = iso.x(corner.row(), corner.col()), y = iso.centerY(corner.row(), corner.col(), h);
+            if (first) { outline.moveTo(x, y); first = false; } else outline.lineTo(x, y);
+        }
+        outline.closePath();
+        return outline;
+    }
+
+    /** Enemy area: translucent red, pulsing dashed border, label. */
+    private void drawZone(Graphics2D pen, IsoProjection iso, TerrainGrid terrain, Zone zone, double clockSeconds) {
+        Path2D.Double outline = groundOutline(iso, terrain, zone.corners(), 0);
+        double pulse = 0.5 + 0.5 * Math.sin(clockSeconds * 1.6);
+        pen.setColor(new Color(200, 30, 40, (int) (34 + 22 * pulse)));
+        pen.fill(outline);
+        pen.setStroke(new BasicStroke(2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 10f, new float[]{9f, 6f},
+                (float) (clockSeconds * 8 % 15)));
+        pen.setColor(new Color(255, 70, 70, (int) (150 + 90 * pulse)));
+        pen.draw(outline);
+        GridPos labelCell = zone.corners().get(0);
+        double h = terrain.at(picture.frame().clamp(labelCell)).heightMeters();
+        pen.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        drawTag(pen, zone.label(), iso.x(labelCell.row(), labelCell.col()) + 8, iso.centerY(labelCell.row(), labelCell.col(), h) + 18,
+                new Color(255, 90, 90), new Color(60, 8, 10, 190));
+    }
+
+    /**
+     * Probability heat: color ramp from amber to red to hot magenta-white, stronger opacity than v0.1,
+     * a bright contour where it crosses 50% of the peak, and a pulsing ring on the peak square.
+     */
+    private void drawBelief(Graphics2D pen, IsoProjection iso, TerrainGrid terrain, double clockSeconds) {
         BeliefGrid belief = picture.belief();
         double max = belief.max();
         if (max <= 0) return;
         int halfW = iso.tileWidth / 2, halfH = iso.tileHeight / 2;
+        int peakRow = 0, peakCol = 0;
+        pen.setStroke(new BasicStroke(1.6f));
         for (int row = 0; row < belief.rows(); row++) {
             for (int col = 0; col < belief.cols(); col++) {
                 double strength = belief.at(row, col) / max;
-                if (strength < 0.06) continue;
-                int alpha = (int) Math.min(190, 30 + 170 * strength);
-                pen.setColor(new Color(255, (int) (190 * (1 - strength)), 40, alpha));
+                if (strength >= 0.999) { peakRow = row; peakCol = col; }
+                if (strength < 0.12) continue;
+                pen.setColor(heatColor(strength));
                 int x = (int) iso.x(row, col), y = (int) iso.y(row, col, terrain.at(row, col).heightMeters());
                 pen.fillPolygon(new Polygon(new int[]{x, x + halfW, x, x - halfW}, new int[]{y, y + halfH, y + 2 * halfH, y + halfH}, 4));
+                if (strength >= 0.5) drawContourEdges(pen, belief, row, col, max, x, y, halfW, halfH);
             }
         }
+        double h = terrain.at(peakRow, peakCol).heightMeters();
+        double px = iso.x(peakRow, peakCol), py = iso.centerY(peakRow, peakCol, h);
+        double ring = 10 + 6 * Math.sin(clockSeconds * 4);
+        pen.setStroke(new BasicStroke(2f));
+        pen.setColor(new Color(255, 230, 120, 200));
+        pen.draw(new Ellipse2D.Double(px - ring, py - ring / 2, ring * 2, ring));
+    }
+
+    /** Bright line only on the diamond edges that face a square below 50% of the peak: a clean contour. */
+    private static void drawContourEdges(Graphics2D pen, BeliefGrid belief, int row, int col, double max,
+                                         int x, int y, int halfW, int halfH) {
+        pen.setColor(new Color(255, 236, 140, 230));
+        if (below(belief, row - 1, col, max)) pen.drawLine(x, y, x + halfW, y + halfH);                     // north-east edge
+        if (below(belief, row + 1, col, max)) pen.drawLine(x - halfW, y + halfH, x, y + 2 * halfH);         // south-west edge
+        if (below(belief, row, col - 1, max)) pen.drawLine(x, y, x - halfW, y + halfH);                     // north-west edge
+        if (below(belief, row, col + 1, max)) pen.drawLine(x + halfW, y + halfH, x, y + 2 * halfH);         // south-east edge
+    }
+
+    private static boolean below(BeliefGrid belief, int row, int col, double max) {
+        if (row < 0 || row >= belief.rows() || col < 0 || col >= belief.cols()) return true;
+        return belief.at(row, col) / max < 0.5;
+    }
+
+    private static Color heatColor(double strength) {
+        // amber (low) -> red (mid) -> magenta (high) -> near-white (peak)
+        double s = Math.min(1, strength);
+        int red, green, blue;
+        if (s < 0.4) { double t = s / 0.4; red = 255; green = (int) (170 - 110 * t); blue = 20; }
+        else if (s < 0.8) { double t = (s - 0.4) / 0.4; red = 255; green = (int) (60 - 40 * t); blue = (int) (20 + 120 * t); }
+        else { double t = (s - 0.8) / 0.2; red = 255; green = (int) (20 + 200 * t); blue = (int) (140 + 100 * t); }
+        int alpha = (int) Math.min(230, 20 + 210 * Math.pow(s, 1.3));     // faint at the edges, strong at the core
+        return new Color(red, green, blue, alpha);
+    }
+
+    private void drawPatrol(Graphics2D pen, IsoProjection iso, TerrainGrid terrain, PatrolRoute patrol, double clockSeconds) {
+        Path2D.Double loop = groundOutline(iso, terrain, patrol.loop(), 10);
+        pen.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, new float[]{3f, 5f},
+                (float) (clockSeconds * 6 % 8)));
+        pen.setColor(new Color(255, 80, 80, 150));
+        pen.draw(loop);
     }
 
     private void drawPath(Graphics2D pen, IsoProjection iso, TerrainGrid terrain, TravelPath path, double clockSeconds) {
@@ -123,20 +208,22 @@ public class IsoBoardView extends JPanel implements PictureObserver {
         }
         if (path.knowledge() == Knowledge.HOLO) {
             float phase = (float) (clockSeconds * 12 % 10);
+            pen.setStroke(new BasicStroke(4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            pen.setColor(new Color(60, 230, 230, 40));                       // soft glow under the dashes
+            pen.draw(line);
             pen.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, new float[]{6f, 4f}, 10f - phase));
-            pen.setColor(new Color(60, 230, 230, 200));
-        } else {
-            pen.setStroke(new BasicStroke(1.5f));
-            pen.setColor(new Color(60, 230, 230, 70));
-        }
-        pen.draw(line);
-        if (path.knowledge() == Knowledge.HOLO) {
+            pen.setColor(new Color(60, 230, 230, 220));
+            pen.draw(line);
             for (Waypoint waypoint : path.waypoints()) {
                 double h = terrain.at(waypoint.pos()).heightMeters() + 40;
                 double x = iso.x(waypoint.pos().row(), waypoint.pos().col());
                 double y = iso.centerY(waypoint.pos().row(), waypoint.pos().col(), h);
-                HOLO.paint(pen, new Ellipse2D.Double(x - 3, y - 3, 6, 6), new Color(60, 230, 230), clockSeconds);
+                HOLO.paint(pen, new Ellipse2D.Double(x - 3, y - 3, 6, 6), DRONE_CYAN, clockSeconds);
             }
+        } else {
+            pen.setStroke(new BasicStroke(1.5f));
+            pen.setColor(new Color(60, 230, 230, 60));
+            pen.draw(line);
         }
     }
 
@@ -155,13 +242,16 @@ public class IsoBoardView extends JPanel implements PictureObserver {
             pen.draw(new Ellipse2D.Double(x - ringW / 2, groundY - ringH / 2, ringW, ringH));
         }
 
-        double size = 14;
-        double symbolY = groundY - 10;                                       // stands slightly above the ground
-        pen.setColor(new Color(0, 0, 0, 90));
+        boolean isDrone = object.kind() == ObjectKind.DRONE;
+        double size = object.kind() == ObjectKind.HOSTILE ? 16 : 14;
+        double symbolY = groundY - (isDrone ? 22 : 12);                     // drones fly higher
+        pen.setStroke(new BasicStroke(1f));
+        pen.setColor(new Color(0, 0, 0, 120));
         pen.drawLine((int) x, (int) groundY, (int) x, (int) symbolY);       // stalk to the ground point
+        pen.fill(new Ellipse2D.Double(x - 3, groundY - 1.5, 6, 3));
 
         BufferedImage droneSprite = sprites.drone();
-        if (object.kind() == ObjectKind.DRONE && droneSprite != null) {
+        if (isDrone && droneSprite != null) {
             double spriteW = 30, spriteH = spriteW * droneSprite.getHeight() / droneSprite.getWidth();
             Composite before = pen.getComposite();
             if (holo) pen.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,
@@ -173,15 +263,26 @@ public class IsoBoardView extends JPanel implements PictureObserver {
         }
 
         pen.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 10));
-        pen.setColor(holo ? new Color(color.getRed(), color.getGreen(), color.getBlue(), 170) : color);
-        pen.drawString(object.label() + (holo ? " (est)" : ""), (int) x + 10, (int) symbolY - 6);
+        Color textColor = holo ? new Color(color.getRed(), color.getGreen(), color.getBlue(), 190) : color;
+        drawTag(pen, object.label() + (holo ? " ?" : ""), x + 11, symbolY - 4, textColor, new Color(0, 0, 0, 140));
+    }
+
+    /** Small label with a dark backing so it reads over any terrain. */
+    private static void drawTag(Graphics2D pen, String text, double x, double y, Color textColor, Color backing) {
+        int width = pen.getFontMetrics().stringWidth(text);
+        pen.setColor(backing);
+        pen.fillRoundRect((int) x - 3, (int) y - 11, width + 6, 14, 4, 4);
+        pen.setColor(textColor);
+        pen.drawString(text, (int) x, (int) y);
     }
 
     private void drawLegend(Graphics2D pen) {
-        pen.setColor(new Color(0, 0, 0, 150));
-        pen.fillRoundRect(8, 8, 300, 22, 8, 8);
+        pen.setColor(new Color(10, 16, 26, 210));
+        pen.fillRoundRect(10, 10, 430, 26, 10, 10);
+        pen.setColor(new Color(60, 230, 230, 120));
+        pen.drawRoundRect(10, 10, 430, 26, 10, 10);
         pen.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        pen.setColor(new Color(220, 225, 230));
-        pen.drawString("SOLID = confirmed   dashed/translucent = HOLO (predicted)", 16, 23);
+        pen.setColor(new Color(215, 225, 235));
+        pen.drawString("SOLID = confirmed    translucent / dashed = HOLO (predicted)    ? = estimate", 20, 27);
     }
 }

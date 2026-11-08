@@ -32,7 +32,7 @@ public class MapStateWriter {
             if (object.kind() == ObjectKind.HAZARD) hazards.add(point);
             else if (object.kind() == ObjectKind.HOSTILE) hostiles.add(point);
             else if (object.kind() == ObjectKind.TOC) team = point;
-            else if (object.kind() == ObjectKind.DRONE) drone = point;
+            else if (object.kind() == ObjectKind.DRONE && drone == null) drone = point;
         }
         String json = "{\n"
                 + "  \"you\": {\"x\": 0, \"y\": 0, \"uncertainty_m\": "

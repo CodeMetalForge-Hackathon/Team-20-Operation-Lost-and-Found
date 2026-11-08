@@ -2,15 +2,15 @@ package c2.model;
 
 import java.awt.Color;
 
-/** Ground type per square, and the numbers the rest of the system uses. */
+/** Ground type per square, and the numbers the rest of the system uses. Colors: deep, satellite-like. */
 public enum GroundCover {
     //            walkCost sensorFactor pull   color
-    OPEN(        1.0,     1.0,         1.0,   new Color(150, 170, 95)),
-    LIGHT_FOREST(1.5,     0.7,         0.9,   new Color(90, 135, 70)),
-    HEAVY_FOREST(2.5,     0.35,        0.8,   new Color(45, 95, 50)),
-    WATER(       99,      1.0,         0.0,   new Color(60, 110, 170)),
-    TRAIL(       0.7,     1.0,         1.6,   new Color(185, 160, 115)),
-    ROCK(        2.0,     0.9,         0.6,   new Color(135, 130, 125));
+    OPEN(        1.0,     1.0,         1.0,   new Color(92, 104, 60)),
+    LIGHT_FOREST(1.5,     0.7,         0.9,   new Color(50, 76, 42)),
+    HEAVY_FOREST(2.5,     0.35,        0.8,   new Color(28, 52, 32)),
+    WATER(       99,      1.0,         0.0,   new Color(22, 50, 88)),
+    TRAIL(       0.7,     1.0,         1.6,   new Color(138, 116, 82)),
+    ROCK(        2.0,     0.9,         0.6,   new Color(104, 100, 94));
 
     public final double walkCost, sensorFactor, pull;
     public final Color color;

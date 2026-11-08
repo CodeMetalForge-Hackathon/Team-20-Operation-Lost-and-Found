@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
  * Format:
  * { "sortie_id": "S1", "returned_at": "2026-11-08T14:12:00Z",
  *   "swept_cells": [[row,col],...], "sighting": [row,col] | null, "hazards_seen": [[row,col],...],
+ *   "hostiles_seen": [[row,col],...],
  *   "medical": {"app_version": "v0.5", "values": [0,1,...], "needs_attention": ["..."]} | null }
  */
 public class DroneReportFolderAdapter implements FeedAdapter {
@@ -97,7 +98,8 @@ public class DroneReportFolderAdapter implements FeedAdapter {
                 cells(root.get("swept_cells")),
                 root.get("sighting") == null ? null : cell((List<Object>) root.get("sighting")),
                 medical,
-                cells(root.get("hazards_seen")));
+                cells(root.get("hazards_seen")),
+                cells(root.get("hostiles_seen")));
     }
 
     @SuppressWarnings("unchecked")
