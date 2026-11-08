@@ -122,8 +122,8 @@ def main():
     ap.add_argument("--conf", type=float, default=0.30, help="YOLO score threshold")
     ap.add_argument("--tile", type=int, default=480, help="default tile size, px (0 = whole frame only)")
     ap.add_argument("--min-box-px", type=float, default=300, help="px², smaller boxes dropped")
-    ap.add_argument("--purple-hue", type=lambda s: tuple(int(v) for v in s.split(",")), default=(125, 155),
-                    help="OpenCV hue range (0–179) counted as purple, 'lo,hi'")
+    ap.add_argument("--purple-hue", type=lambda s: tuple(int(v) for v in s.split(",")), default=(135, 170),
+                    help="OpenCV hue range (0–179) counted as purple, 'lo,hi' (the purple cups are magenta-ish, hue 155–161)")
     ap.add_argument("--sat-min", type=int, default=70, help="HSV saturation a coloured pixel needs")
     a = ap.parse_args()
     cups = Cups(a)
