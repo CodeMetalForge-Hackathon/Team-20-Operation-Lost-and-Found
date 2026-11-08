@@ -1,0 +1,50 @@
+# GHOST Jetson stack (ghost-core, camera + cuVSLAM + Nav2, base driver, frame
+# server, GHOST<->Nav2 bridge) as a boot service, in its own container.
+#
+#   sudo cp jetson/ghost-stack.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ghost-stack
+#
+# Mode: WHEELS LIVE, Nav2 + bridge running. Nothing moves before the operator's
+# GO. For a dry boot add  -e DRY_RUN=1  (and -e NO_NAV2=1) to ExecStart.
+# Stop:  sudo systemctl stop ghost-stack   (Ctrl-C to every process; wheels zeroed)
+# Logs:  journalctl -u ghost-stack -f  and  jetson/logs/*.log
+#
+# Runs as root inside the container (like `docker exec`), because the image's
+# entrypoint user is not in `dialout` and could not open the motor board.
+# Do not also run jetson/start.sh in the dev container while this is active:
+# both bind port 9001/5555 and drive the same motors.
+
+[Unit]
+Description=GHOST Jetson stack (Isaac ROS container)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f ghost_stack
+ExecStart=/usr/bin/docker run --rm --name ghost_stack \
+  --privileged --network host --ipc=host --gpus all \
+  -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -e ISAAC_ROS_WS=/workspaces/isaac_ros-dev -e HOME=/workspaces/isaac_ros-dev \
+  -e ISAAC_ROS_PLATFORM=arm64-jetpack \
+  -v /home/megistus/workspaces/isaac_ros-dev:/workspaces/isaac_ros-dev \
+  -v /dev/bus/usb:/dev/bus/usb -v /tmp/:/tmp/ \
+  -v /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra \
+  -v /usr/src/jetson_multimedia_api:/usr/src/jetson_multimedia_api \
+  -v /usr/share/vpi3:/usr/share/vpi3 \
+  -v /etc/localtime:/etc/localtime:ro \
+  -w /workspaces/isaac_ros-dev/ghost \
+  --entrypoint /bin/bash \
+  nvcr.io/nvidia/isaac/ros:isaac_ros-gemini_slam_360ccfa4e3f6611e277d404d719273e7-arm64-jetpack \
+  jetson/start.sh
+# docker stop sends SIGTERM to start.sh (the container's PID 1), which Ctrl-Cs
+# every process group and escalates after 10 s; allow it time to finish.
+ExecStop=/usr/bin/docker stop -t 30 ghost_stack
+TimeoutStopSec=45
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
