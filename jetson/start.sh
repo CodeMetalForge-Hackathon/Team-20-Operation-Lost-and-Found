@@ -10,6 +10,7 @@
 #   CAM_X=0.12 CAM_Z=0.10 bash jetson/start.sh  camera mount offset from robot centre (m)
 #                                               default: measured mount, 6.35 cm ahead, 14.2875 cm up
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
+#                                               default: this robot, from base_driver.py --identify
 #   DASH_PORT=8000 bash jetson/start.sh          dashboard served at http://<jetson-ip>:8000/
 #
 # Logs: jetson/logs/*.log      Stop: Ctrl-C (wheels are stopped on exit)
@@ -88,7 +89,10 @@ start robot ros2 launch "$J/launch/robot.launch.py" nav2:="$NAV2" \
 # ── wheels ────────────────────────────────────────────────────────────────────
 HW=(--hardware); [ -n "${DRY_RUN:-}" ] && HW=()
 # shellcheck disable=SC2086
-start base python3 "$J/base_driver.py" "${HW[@]}" --nav "${STAMP_ARGS[@]}" ${DRIVE_ARGS:-}
+# wheel wiring found on the bench with base_driver.py --identify (motor ids in
+# fl, fr, rl, rr order, and direction signs); override with DRIVE_ARGS=...
+DRIVE_ARGS="${DRIVE_ARGS:-"--ids 1,3,2,4 --signs=1,-1,1,-1"}"
+start base python3 "$J/base_driver.py" "${HW[@]}" --nav "${STAMP_ARGS[@]}" ${DRIVE_ARGS}
 
 # ── camera frames → Pi detector ──────────────────────────────────────────────
 FRAME_TOPIC=/camera/left_ir/image_raw/compressed
