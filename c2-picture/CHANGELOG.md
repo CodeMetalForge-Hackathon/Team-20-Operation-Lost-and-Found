@@ -1,5 +1,8 @@
 # C2 operations picture: iteration log
 
+## v0.3
+- Reduced to **2 UAVs** per wave so routes and drones are easier to follow on the board.
+
 ## v0.2
 - **3 UAVs** fly each wave in parallel. The planner spreads them out: each drone skips targets the earlier drones already took. Launches are staggered one minute apart.
 - **Larger enemy presence:** an ENEMY AO zone (pulsing red area), six hostiles (command post, observation post, squad, vehicle, possible sniper, a patrol moving along a predicted loop). The planner routes around enemy areas and keeps stand-off from known hostiles.

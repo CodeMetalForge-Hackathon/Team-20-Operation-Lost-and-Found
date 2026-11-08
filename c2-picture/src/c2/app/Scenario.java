@@ -16,10 +16,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
-/** The starting picture: 5 x 5 mile AO, 50 m squares, TOC, 3 UAVs, last known location, enemy presence. */
+/** The starting picture: 5 x 5 mile AO, 50 m squares, TOC, 2 UAVs, last known location, enemy presence. */
 public final class Scenario {
     public static final String SUBJECT = "subject-1", TOC = "toc";
-    public static final List<String> DRONES = List.of("uav-1", "uav-2", "uav-3");
+    public static final List<String> DRONES = List.of("uav-1", "uav-2");
     public static final GeoFrame FRAME = new GeoFrame(162, 162, 50);
     public static final GridPos LAST_KNOWN = new GridPos(70, 82);
     public static final GridPos TRUE_SUBJECT = new GridPos(90, 99);        // hidden; only the simulated drone knows

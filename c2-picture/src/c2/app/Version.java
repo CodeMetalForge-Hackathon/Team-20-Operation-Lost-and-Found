@@ -2,6 +2,6 @@ package c2.app;
 
 /** Iteration number, shown in the window title and the SITREP panel. Bump with every change. */
 public final class Version {
-    public static final String VERSION = "v0.2";
+    public static final String VERSION = "v0.3";
     private Version() { }
 }
