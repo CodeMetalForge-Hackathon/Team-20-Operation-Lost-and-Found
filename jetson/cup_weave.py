@@ -437,8 +437,12 @@ def main():
     ap.add_argument("--resend", type=float, default=0.15, help="m a refined cup must move before its goal is re-sent")
     ap.add_argument("--skip-colours", type=lambda v: set(v.split(",")) if v else set(), default={"grey"},
                     help="comma list: 'cups' of these colours are ignored (YOLO false hits are mostly grey)")
+    ap.add_argument("--stop-colour", default="purple", help="the cup colour that ends a sequence")
+    ap.add_argument("--colours", type=lambda v: set(v.split(",")) if v else set(), default=set(),
+                    help="comma list: only cups of these colours are weaved (the stop colour always counts; "
+                         "empty = all)")
     ap.add_argument("--purple-radius", type=float, default=0.5,
-                    help="m around a passed purple cup where detections are ignored")
+                    help="m around a passed stop-colour cup where detections are ignored")
     ap.add_argument("--more-range", type=float, default=3.0,
                     help="m: after a purple cup, look for unpassed cups this far from the robot")
     ap.add_argument("--direct-range", type=float, default=0.6, help="m: Nav2 stopped closer than this → finish directly")
@@ -490,8 +494,11 @@ def main():
             log(f"  {'BOX' if b['kind'] == 'box' else 'large obstacle'} at ({b['centre'][0]:+.2f},{b['centre'][1]:+.2f}), "
                 f"{b['size'][0]:.2f}×{b['size'][1]:.2f} m, {b['height'] * 100:.0f} cm tall: {relative(b, cups)}")
 
+    def wanted(c):
+        return not a.colours or c.colour in a.colours or c.colour == a.stop_colour
+
     def in_purple_zone(pos):
-        return any(k.passed and k.colour == "purple" and math.dist(k.pos, pos) <= a.purple_radius for k in cups)
+        return any(k.passed and k.colour == a.stop_colour and math.dist(k.pos, pos) <= a.purple_radius for k in cups)
 
     def do_look(tag="", still=True, save="always"):
         """Look (stopped, or on the move: odometry is taken at the frame's time)."""
@@ -530,7 +537,7 @@ def main():
         zone), nearest first.  With a heading: those ahead (±--ahead-fov) first, then the rest —
         so a cup spotted late behind the robot doesn't pull it back and break the chain."""
         cs = [c for c in cups if not c.passed and not c.failed and math.dist(c.pos, near) <= rng
-              and not in_purple_zone(c.pos)]
+              and not in_purple_zone(c.pos) and wanted(c)]
         cs.sort(key=lambda c: math.dist(c.pos, near))
         if heading is not None:
             ahead = lambda c: abs(wrap(math.atan2(c.pos[1] - near[1], c.pos[0] - near[0]) - heading)) \
@@ -685,9 +692,9 @@ def main():
                 passed = pass_cup(c, side)
                 side = "right" if side == "left" else "left"     # the weave pattern holds even past a skipped cup
                 if passed:
-                    if c.colour == "purple":
+                    if c.colour == a.stop_colour:
                         last = c
-                        log(f"=== sequence {st['seq']} ends at purple cup#{c.id} — ignoring {a.purple_radius} m "
+                        log(f"=== sequence {st['seq']} ends at {a.stop_colour} cup#{c.id} — ignoring {a.purple_radius} m "
                             f"around it from now on")
                         purple = True
                         break
@@ -699,7 +706,7 @@ def main():
                     c = nxt[0]; continue
                 c = search(NEAR + BACK, ref, a.next_range, f"next cup within {a.next_range} m", travel)
                 if c is None:
-                    log(f"=== no purple cup, and nothing within {a.next_range} m all around — finishing")
+                    log(f"=== no {a.stop_colour} cup, and nothing within {a.next_range} m all around — finishing")
             if not purple:
                 break
             # after a purple cup: any cup not found yet, within --more-range of here?
