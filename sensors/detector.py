@@ -105,8 +105,18 @@ class PersonDetector:
             from hailo_platform import FormatType, HailoSchedulingAlgorithm, VDevice
             params = VDevice.create_params()
             params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            # Through hailort_service, so several processes share the chip
+            # (fusion's person detector, sensors/cup_server.py); every user
+            # must open it this way.  Without the service: exclusive access.
+            params.multi_process_service = True
+            params.group_id = "SHARED"
             self._stack = contextlib.ExitStack()
-            dev = self._stack.enter_context(VDevice(params))
+            try:
+                dev = self._stack.enter_context(VDevice(params))
+            except Exception as exc:                       # noqa: BLE001
+                print(f"[detector] shared Hailo unavailable ({exc}) — opening it exclusively")
+                params.multi_process_service = False
+                dev = self._stack.enter_context(VDevice(params))
             model = dev.create_infer_model(str(hef))
             model.input().set_format_type(FormatType.UINT8)
             model.output().set_format_type(FormatType.FLOAT32)
@@ -142,6 +152,11 @@ class PersonDetector:
         return np.ascontiguousarray(canvas[:, :, ::-1]), r, left, top   # → RGB
 
     def detect(self, image) -> list[tuple[float, tuple[float, float, float, float]]]:
+        """People: [(score, (x1, y1, x2, y2) normalised)], best first."""
+        return [(s, box) for _, s, box in self.detect_classes(image, (PERSON,))]
+
+    def detect_classes(self, image, classes) -> list[tuple[int, float, tuple[float, float, float, float]]]:
+        """Any COCO classes: [(class id, score, (x1, y1, x2, y2) normalised)], best first."""
         if not self.available:
             return []
         import cv2
@@ -159,16 +174,17 @@ class PersonDetector:
             b.input().set_buffer(rgb)
             b.output().set_buffer(self._out)
             self._cfg.run([b], 5000)
-            dets = [(s, (x1 * S, y1 * S, x2 * S, y2 * S))
-                    for s, (y1, x1, y2, x2) in parse_hailo_nms(b.output().get_buffer(), 80)
-                    if s >= self.conf]
+            raw = b.output().get_buffer()
+            dets = [(c, s, (x1 * S, y1 * S, x2 * S, y2 * S)) for c in classes
+                    for s, (y1, x1, y2, x2) in parse_hailo_nms(raw, 80, c) if s >= self.conf]
         else:
             x = rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-            dets = decode_yolov8(self._sess.run(None, {self._inp: x})[0], self.conf, self.iou)
+            out0 = self._sess.run(None, {self._inp: x})[0]
+            dets = [(c, s, b_) for c in classes for s, b_ in decode_yolov8(out0, self.conf, self.iou, c)]
         out = []
-        for s, (x1, y1, x2, y2) in sorted(dets, reverse=True):     # undo letterbox
+        for c, s, (x1, y1, x2, y2) in sorted(dets, key=lambda d: -d[1]):     # undo letterbox
             box = ((x1 - left) / r / ow, (y1 - top) / r / oh, (x2 - left) / r / ow, (y2 - top) / r / oh)
-            out.append((s, tuple(float(np.clip(v, 0, 1)) for v in box)))
+            out.append((c, s, tuple(float(np.clip(v, 0, 1)) for v in box)))
         return out
 
     def close(self) -> None:

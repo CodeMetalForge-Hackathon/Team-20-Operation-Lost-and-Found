@@ -1,0 +1,19 @@
+# Cup detector (YOLOv8s on the Hailo) for jetson/cup_weave.py — Pi, port 8091.
+# Shares the Hailo with ghost-fusion through hailort_service.
+#   sudo cp sensors/ghost-cups.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ghost-cups
+[Unit]
+Description=GHOST cup detector (YOLOv8s on the Hailo, HTTP :8091)
+After=network-online.target hailort.service
+Wants=network-online.target
+
+[Service]
+User=ghost
+WorkingDirectory=/home/ghost/ghost/sensors
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 cup_server.py --port 8091
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
