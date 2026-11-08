@@ -56,7 +56,7 @@ controller_server:
       motion_model: "DiffDrive"
       DiffDrive:                     # Nav2 Kilted+: motion models are plugins
         plugin: "mppi::DiffDriveMotionModel"
-      vx_max: 0.30
+      vx_max: 0.40                   # 85 rpm motors, 4.85 cm wheels: 0.43 m/s is the ceiling
       vx_min: 0.0                    # never reverse: nothing sees behind
       vy_max: 0.0
       wz_max: 1.2
@@ -109,8 +109,8 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.2
     simulate_ahead_time: 1.5
-    max_rotational_vel: 0.8
-    min_rotational_vel: 0.3
+    max_rotational_vel: 1.2
+    min_rotational_vel: 0.4
     rotational_acc_lim: 2.0
 
 local_costmap:
