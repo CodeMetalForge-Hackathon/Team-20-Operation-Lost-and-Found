@@ -301,8 +301,10 @@
 <script>
 // ── config ───────────────────────────────────────────────────────────────────
 // ?ws=ws://<jetson-ip>:9001/ws  to watch the robot;  ?cell=0.5  to match the mission's cell size
+// Served by the Jetson (http://<jetson-ip>:8000/), it defaults to that same host's core.
 const PARAMS      = new URLSearchParams(location.search);
-const WS_URL      = PARAMS.get('ws') || 'ws://localhost:9001/ws';
+const WS_URL      = PARAMS.get('ws') ||
+  (location.protocol.startsWith('http') ? `ws://${location.hostname}:9001/ws` : 'ws://localhost:9001/ws');
 const QUERY_MS    = 250;
 const CELL_PX     = 28;    // pixels per grid cell
 const MAX_ENTROPY = 6.0;   // log(400) ≈ 5.99

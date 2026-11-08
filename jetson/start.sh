@@ -10,6 +10,7 @@
 #   CAM_X=0.12 CAM_Z=0.10 bash jetson/start.sh  camera mount offset from robot centre (m)
 #                                               default: measured mount, 6.35 cm ahead, 14.2875 cm up
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
+#   DASH_PORT=8000 bash jetson/start.sh          dashboard served at http://<jetson-ip>:8000/
 #
 # Logs: jetson/logs/*.log      Stop: Ctrl-C (wheels are stopped on exit)
 set -uo pipefail
@@ -93,6 +94,10 @@ FRAME_TOPIC=/camera/left_ir/image_raw/compressed
 [ "${COLOR:-false}" = "true" ] && FRAME_TOPIC=/camera/color/image_raw/compressed
 start frames python3 "$J/frame_server.py" --topic "$FRAME_TOPIC"
 
+# ── dashboard for PCs on the network: http://<jetson-ip>:8000/ ───────────────
+DASH_PORT="${DASH_PORT:-8000}"
+start dashboard python3 -m http.server "$DASH_PORT" --bind 0.0.0.0 --directory "$GHOST_DIR/dashboard"
+
 # ── bridge (waits for Nav2, and drives only once the Pi's sensors report) ────
 if [ "$NAV2" = "true" ] && [ -z "${NO_BRIDGE:-}" ]; then
   sleep 2
@@ -101,6 +106,7 @@ if [ "$NAV2" = "true" ] && [ -z "${NO_BRIDGE:-}" ]; then
 fi
 
 echo "[ghost] running — core ws://$(hostname -I 2>/dev/null | awk '{print $1}'):${GHOST_ADDR##*:}/ws   Ctrl-C to stop"
+echo "[ghost] dashboard http://$(hostname -I 2>/dev/null | awk '{print $1}'):$DASH_PORT/"
 echo "[ghost] watch: tail -f $LOGS/*.log"
 wait -n "${PIDS[@]}"
 echo "[ghost] a process exited — see $LOGS/" >&2
