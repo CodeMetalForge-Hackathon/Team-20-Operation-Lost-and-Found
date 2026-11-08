@@ -12,6 +12,9 @@ Our system pairs an autonomous drone that searches a comms-denied area with a **
 ![Operational loop](Operational_Loop.png)
 *Operational loop: TOC → drone → on objective → return → TOC.*
 
+![Day 2 engineer plan](day2engineerPlan.png)
+*Day 2 engineer plan: data pipeline, command engine, sim TOC changes, and field display changes.*
+
 ---
 
 ## The problem
