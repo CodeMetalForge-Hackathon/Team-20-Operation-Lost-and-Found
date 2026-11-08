@@ -185,7 +185,7 @@ def main():
     ap.add_argument("--max-jitter", type=float, default=0.5, help="deg, floor normal frame-to-frame")
     ap.add_argument("--time", type=float, default=1.5, help="s per drive leg")
     ap.add_argument("--speed", type=float, default=0.15, help="m/s")
-    ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--reps", type=int, default=4, help="out-and-back strokes; more = less noise")
     ap.add_argument("--max-turn", type=float, default=3.0, help="deg per leg, else wheels suspect")
     ap.add_argument("--max-spread", type=float, default=2.5, help="deg across legs")
     ap.add_argument("--max-disagree", type=float, default=3.0, help="deg between fwd and back means")

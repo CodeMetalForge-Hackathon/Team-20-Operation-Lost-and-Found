@@ -20,7 +20,7 @@
 # height — standing still) and then DRIVES ~20 cm straight forward and back for
 # the yaw (skipped if something is in the way ahead, or with DRY_RUN); the
 # results go to jetson/config/mount_calibration.env and the full stack starts
-# with them.  Values failing their checks keep the previous ones.  Adds ~40 s.
+# with them.  Values failing their checks keep the previous ones.  Adds ~25 s.
 #   DRIVE_ARGS="--ids 2,1,4,3 --signs=1,-1,1,-1" bash jetson/start.sh   wheel wiring
 #                                               default: this robot, from base_driver.py --identify
 #   FILTER_ARGS="--close 0.6" bash jetson/start.sh  obstacle_filter.py options (--help)
